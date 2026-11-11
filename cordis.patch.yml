@@ -1,0 +1,6 @@
+# @learnmap/web-plugin — 学习分支图 bundle 补丁。
+# 插入插件行：宿主半区（index.js 的空 apply）激活后，package.json 的 dsh.client
+# 才会把浏览器半区（client.js）加入启动图并在对话页挂载「知识树」面板。
+- insert:
+    - id: learnmap
+      name: '@learnmap/web-plugin'

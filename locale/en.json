@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Learning Branch Map",
+    "description": "Turns the question-and-answer flow of the current session into a knowledge-point tree above the composer; click a node to jump back to that question."
+  }
+}
