@@ -42,7 +42,7 @@ window.__ModuleLoader__.load({
 			).split(/\s+/)
 		)
 
-		/** 内容块数组里的纯文本（text / reasoning），忽略工具与图片噪声。 */
+		/** 内容块数组里的纯文本：只认 type/kind = text；reasoning、工具调用、图片都忽略。 */
 		function textOf(blocks) {
 			if (typeof blocks === 'string') return blocks
 			if (!Array.isArray(blocks)) return ''
