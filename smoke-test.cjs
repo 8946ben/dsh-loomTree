@@ -247,7 +247,7 @@ if (graphEntry) {
 // 把 buildTree / layoutGraph 暴露出来做断言：在源码尾部临时追加导出。
 const probeSource = source.replace(
   'return { inject, apply }',
-  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
+  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
 )
 loaded = null
 vm.runInContext(probeSource, sandbox, { filename: 'client-probe.js' })
@@ -361,6 +361,58 @@ if (typeof layoutGraph === 'function') {
   check('不同宽度的孙节点也与父中心对齐', !!w2 && !!w3 && Math.abs(centerOf(w2) - centerOf(w3)) < 0.001, JSON.stringify([w2 && centerOf(w2), w3 && centerOf(w3)]))
   check('布局整体平移后最左缘为 0', chain.nodes.every((item) => item.x >= 0) && Math.min(...chain.nodes.map((item) => item.x)) === 0, JSON.stringify(chain.nodes.map((item) => item.x)))
   check('平移后画布宽度仍覆盖最右缘', Math.abs(chain.width - Math.max(...chain.nodes.map((item) => item.x + item.w))) < 0.001, String(chain.width))
+
+  // LLM 关系修正：只接受指向更早节点的修改，root 表示提为顶层
+  const applyLlmParents = probe.__applyLlmParents
+  check('探针可取到 applyLlmParents', typeof applyLlmParents === 'function')
+  if (typeof applyLlmParents === 'function') {
+    const ruleChain = {
+      roots: [
+        {
+          id: 'r1',
+          seq: 1,
+          text: '投机解码有哪些',
+          label: '投机解码',
+          children: [
+            {
+              id: 'r2',
+              seq: 2,
+              text: '扩散草稿有哪些类型',
+              label: '扩散草稿',
+              children: [{ id: 'r3', seq: 3, text: '特征级自回归草稿有哪些', label: '特征级自回归草稿', children: [] }]
+            }
+          ]
+        }
+      ],
+      count: 3,
+      latestId: 'r3'
+    }
+    const same = applyLlmParents(ruleChain, {})
+    check('没有修正建议时原样返回', same === ruleChain)
+
+    const moved = applyLlmParents(ruleChain, { r3: 'r1' })
+    const movedRoot = moved.roots[0]
+    const movedIds = (movedRoot.children || []).map((node) => node.id)
+    check('LLM 可把挂在兄弟链上的节点改挂到更早的父节点', movedIds.length === 2 && movedIds.indexOf('r2') >= 0 && movedIds.indexOf('r3') >= 0, JSON.stringify(movedIds))
+    check('修正后节点数与最新节点不变', moved.count === 3 && moved.latestId === 'r3')
+
+    const detached = applyLlmParents(ruleChain, { r2: 'root' })
+    check('root 建议会把节点提为顶层', detached.roots.some((node) => node.id === 'r2'), JSON.stringify(detached.roots.map((node) => node.id)))
+
+    const later = applyLlmParents(ruleChain, { r1: 'r3' })
+    check('指向更晚节点的建议被忽略', later === ruleChain)
+
+    const missing = applyLlmParents(ruleChain, { r2: 'nope' })
+    check('指向不存在节点的建议被忽略', missing === ruleChain)
+
+    const signature = probe.__relationSignature
+    check('探针可取到 relationSignature', typeof signature === 'function')
+    if (typeof signature === 'function') {
+      const first = signature(ruleChain)
+      const again = signature({ ...ruleChain, roots: JSON.parse(JSON.stringify(ruleChain.roots)) })
+      check('节点集合相同则签名稳定', first === again)
+    }
+  }
 
 
   const foldedSynthetic = layoutGraph(synthetic, { a: true })

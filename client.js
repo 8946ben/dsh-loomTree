@@ -286,7 +286,6 @@ window.__ModuleLoader__.load({
 		const MAX_REQUEST = 40
 		/** 正在请求中的提问哈希：避免快速追问时对同一批问题重复付费。 */
 		const namingInFlight = new Set()
-
 		/** 稳定的短哈希（djb2），用于按提问文本缓存命名。 */
 		function hashText(text) {
 			let hash = 5381
@@ -351,7 +350,8 @@ window.__ModuleLoader__.load({
 				return {
 					enabled: true,
 					provider: typeof info.provider === 'string' ? info.provider : '',
-					model: typeof info.model === 'string' ? info.model : ''
+					model: typeof info.model === 'string' ? info.model : '',
+					relate: info.relate !== false
 				}
 			} catch (error) {
 				return null
@@ -485,8 +485,10 @@ window.__ModuleLoader__.load({
 			const windowState = useEventWindow(binding)
 			const baseTree = useMemo(() => buildTree(windowState.entries), [windowState])
 			const edits = useEdits()
-			// 手动编辑（改名 / 改关系）在这里落地，输入框面板与侧栏图看到的是同一棵改写后的树。
-			const tree = useMemo(() => applyEdits(baseTree, editStore), [baseTree, edits.version])
+			const relations = useRelations()
+			// 顺序很重要：规则树 → LLM 关系修正 → 手动编辑（人工改关系永远最后生效）。
+			const llmTree = useMemo(() => applyLlmParents(baseTree, relations.parents), [baseTree, relations.parents])
+			const tree = useMemo(() => applyEdits(llmTree, editStore), [llmTree, edits.version])
 			const naming = useNaming()
 			const [llmConfig, setLlmConfig] = useState(undefined)
 
@@ -512,6 +514,15 @@ window.__ModuleLoader__.load({
 				}, 700)
 				return () => clearTimeout(timer)
 			}, [tree, llmConfig])
+
+			// 规则树变化 → 防抖后请模型复核关系；节点集合不变时 driveRelations 内部直接跳过。
+			useEffect(() => {
+				if (!llmConfig || llmConfig.relate === false) return undefined
+				const timer = setTimeout(() => {
+					driveRelations(baseTree, llmConfig)
+				}, 900)
+				return () => clearTimeout(timer)
+			}, [baseTree, llmConfig])
 
 			const displayNames = useMemo(() => {
 				const cache = readLabelCache()
@@ -551,6 +562,7 @@ window.__ModuleLoader__.load({
 				tree,
 				llmConfig,
 				naming,
+				relations: relations.parents,
 				editVersion: edits.version,
 				displayName: node => displayNames.get(node.id) || node.label,
 				busy,
@@ -1154,6 +1166,215 @@ window.__ModuleLoader__.load({
 			return { roots, count: tree.count, latestId: tree.latestId }
 		}
 
+		// ==============================================================
+		// 6.4.1 LLM 关系修正（规则建树的兜底）
+		// ==============================================================
+		//
+		// 规则建树便宜、稳定，但会犯错：术语没命中的并列问题容易被串成一条链，
+		// 或者被某个泛词吸到不相关的节点下。这里把整棵树的提问交给一次模型复核，
+		// 只接受「指向更早节点」的修改；手动改的关系仍然最后应用、永远优先。
+		// 结果按「节点 id + seq」签名缓存在本地，节点集合不变就不会重复付费。
+
+		const RELATIONS_ROUTE = '/learnmap/relations'
+		const RELATION_CACHE = 'learnmap.llm.relations.v1'
+		const RELATION_CACHE_MAX = 60
+		const RELATION_MAX_ITEMS = 80
+		const relationInFlight = new Map()
+
+		const relationsStore = {
+			parents: {},
+			status: 'idle', // idle | busy | failed
+			error: null,
+			signature: null,
+			version: 0,
+			listeners: new Set(),
+			subscribe(listener) {
+				this.listeners.add(listener)
+				return () => {
+					this.listeners.delete(listener)
+				}
+			},
+			emit() {
+				this.version += 1
+				for (const listener of Array.from(this.listeners)) {
+					try {
+						listener()
+					} catch (error) {
+						console.error('[learnmap] relations listener:', error)
+					}
+				}
+			},
+			patch(next) {
+				if (next.parents !== undefined) {
+					this.parents = next.parents && typeof next.parents === 'object' ? next.parents : {}
+				}
+				if (next.status !== undefined) this.status = next.status
+				if (next.error !== undefined) this.error = next.error
+				if (next.signature !== undefined) this.signature = next.signature
+				this.emit()
+			}
+		}
+
+		function useRelations() {
+			const [version, setVersion] = useState(relationsStore.version)
+			useEffect(() => relationsStore.subscribe(() => setVersion(relationsStore.version)), [])
+			return {
+				version,
+				parents: relationsStore.parents,
+				status: relationsStore.status,
+				error: relationsStore.error
+			}
+		}
+
+		/** 节点集合签名：只由 id + seq 决定，改名 / 关系变化都不触发重新请求。 */
+		function relationSignature(tree) {
+			const entries = flattenTree(tree.roots)
+			return hashText(entries.map(entry => entry.node.id + ':' + (entry.node.seq || 0)).join('|'))
+		}
+
+		function readRelationCache() {
+			try {
+				const parsed = JSON.parse(readStore(RELATION_CACHE) || '{}')
+				return parsed && typeof parsed === 'object' ? parsed : {}
+			} catch (error) {
+				return {}
+			}
+		}
+
+		function writeRelationCache(signature, parents) {
+			try {
+				const cache = readRelationCache()
+				cache[signature] = parents
+				const keys = Object.keys(cache)
+				if (keys.length > RELATION_CACHE_MAX) {
+					const kept = {}
+					for (const key of keys.slice(keys.length - RELATION_CACHE_MAX)) kept[key] = cache[key]
+					writeStore(RELATION_CACHE, JSON.stringify(kept))
+					return
+				}
+				writeStore(RELATION_CACHE, JSON.stringify(cache))
+			} catch (error) {
+				// 缓存失败不影响本次展示。
+			}
+		}
+
+		/**
+		 * 应用 LLM 给的父子关系修正。只接受指向更早节点的建议（从结构上不可能成环），
+		 * `root` 表示提为顶层；手动编辑在之后应用，所以人工关系永远优先。
+		 * @param tree - 规则树。
+		 * @param parents - `{ [id]: parentId | 'root' }`。
+		 * @returns 新树；没有有效修改时原样返回。
+		 */
+		function applyLlmParents(tree, parents) {
+			if (!tree || tree.count === 0 || !parents) return tree
+			if (Object.keys(parents).length === 0) return tree
+			const entries = flattenTree(tree.roots)
+			const order = new Map()
+			const seqOf = new Map()
+			entries.forEach((entry, index) => {
+				order.set(entry.node.id, index)
+				seqOf.set(entry.node.id, entry.node.seq || 0)
+			})
+			const chosen = new Map()
+			let changed = false
+			for (const entry of entries) {
+				const current = entry.parentId
+				let next = current
+				if (Object.prototype.hasOwnProperty.call(parents, entry.node.id)) {
+					const raw = parents[entry.node.id]
+					if (raw === 'root') {
+						next = null
+					} else if (typeof raw === 'string' && raw !== entry.node.id && order.has(raw)) {
+						const rawSeq = seqOf.get(raw) || 0
+						const selfSeq = seqOf.get(entry.node.id) || 0
+						const earlier = rawSeq < selfSeq || (rawSeq === selfSeq && order.get(raw) < order.get(entry.node.id))
+						if (earlier) next = raw
+					}
+				}
+				chosen.set(entry.node.id, next)
+				if (next !== current) changed = true
+			}
+			if (!changed) return tree
+
+			const nodes = new Map()
+			for (const entry of entries) {
+				nodes.set(entry.node.id, Object.assign({}, entry.node, { children: [] }))
+			}
+			const roots = []
+			for (const entry of entries) {
+				const node = nodes.get(entry.node.id)
+				const parentId = chosen.get(entry.node.id)
+				const parent = parentId ? nodes.get(parentId) : null
+				if (parent) parent.children.push(node)
+				else roots.push(node)
+			}
+			const sortRec = list => {
+				list.sort((left, right) => (left.seq || 0) - (right.seq || 0))
+				for (const node of list) sortRec(node.children)
+			}
+			sortRec(roots)
+			return { roots, count: tree.count, latestId: tree.latestId }
+		}
+
+		/** 请宿主复核整棵树的父子关系。 */
+		async function requestRelations(items) {
+			const res = await fetch(RELATIONS_ROUTE, {
+				method: 'POST',
+				credentials: 'same-origin',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ items: items.slice(0, RELATION_MAX_ITEMS) })
+			})
+			if (!res.ok) throw new Error('HTTP ' + res.status)
+			const json = await res.json()
+			return {
+				parents: json && json.parents && typeof json.parents === 'object' ? json.parents : {},
+				error: json && typeof json.error === 'string' ? json.error : null
+			}
+		}
+
+		/**
+		 * 驱动一次关系复核：节点集合不变就直接用缓存 / 现有结果。
+		 * @param tree - 规则树（不要传已修正的树，否则「保持 parent」会读到修正值）。
+		 * @param config - loadLlmConfig() 的结果；`relate: false` 时不动。
+		 */
+		async function driveRelations(tree, config) {
+			if (!config || config.relate === false) return
+			if (!tree || tree.count < 2) return
+			const signature = relationSignature(tree)
+			if (relationsStore.signature === signature) return
+			if (relationInFlight.has(signature)) return relationInFlight.get(signature)
+			const cache = readRelationCache()
+			if (cache[signature] && typeof cache[signature] === 'object') {
+				relationsStore.patch({ parents: cache[signature], signature, status: 'idle', error: null })
+				return
+			}
+			relationsStore.patch({ status: 'busy', error: null })
+			const items = flattenTree(tree.roots).map(entry => ({
+				id: entry.node.id,
+				seq: entry.node.seq || 0,
+				text: entry.node.text,
+				parent: entry.parentId || 'root'
+			}))
+			const task = (async () => {
+				try {
+					const result = await requestRelations(items)
+					relationsStore.patch({
+						parents: result.parents,
+						signature,
+						status: result.error ? 'failed' : 'idle',
+						error: result.error
+					})
+					if (!result.error) writeRelationCache(signature, result.parents)
+				} catch (error) {
+					relationsStore.patch({ status: 'failed', error: String((error && error.message) || error), signature })
+				} finally {
+					relationInFlight.delete(signature)
+				}
+			})()
+			relationInFlight.set(signature, task)
+			return task
+		}
+
 
 // 画板底纹：设置项、持久化、样式计算与图片压缩
 //
@@ -1511,7 +1732,7 @@ function shrinkImage(file, maxSize, quality) {
 		function GraphSurface(props) {
 			const sessionId = props.sessionId
 			props.useSession(snapshot => snapshot)
-			const { binding, windowState, tree, llmConfig, naming, displayName, onJump, editVersion } = useLearnmapSession(sessionId)
+			const { binding, windowState, tree, llmConfig, naming, relations, displayName, onJump, editVersion } = useLearnmapSession(sessionId)
 			const [collapsed, setCollapsed] = useState({})
 			const [zoom, setZoom] = useState(1)
 			const [pickedId, setPickedId] = useState(null)
@@ -1987,6 +2208,9 @@ function shrinkImage(file, maxSize, quality) {
 					? h('span', { className: 'lm-graph-badge lm-warn', title: naming.error || '' }, '命名失败')
 					: null,
 				llmConfig ? null : h('span', { className: 'lm-graph-badge' }, '规则命名'),
+				llmConfig && llmConfig.relate !== false && relations && Object.keys(relations).length > 0
+					? h('span', { className: 'lm-graph-badge', title: 'LLM 复核过父子关系，只修正了明显挂错的分支' }, '关系已校正')
+					: null,
 				h(
 					'div',
 					{ className: 'lm-graph-tools' },

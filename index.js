@@ -1,35 +1,40 @@
 // 学习分支图 · Host 半区（0.2.x）。
 //
 // 分工：
-//   - 父子关系 —— 浏览器半区的规则算，宿主不参与；
+//   - 父子关系 —— 浏览器半区先按规则建树，再由本插件请 LLM 复核明显错误；
 //   - 节点命名 —— 宿主调 LLM（走 `ctx.llm`，与聊天同一条通路），结果按提问文本缓存，
 //     再经本机的只读回环路由交给页面。
 //
-// 为什么命名放在宿主：这台机器的浏览器请求会走系统代理，而代理到不了模型端点；
+// 为什么模型调用放在宿主：这台机器的浏览器请求会走系统代理，而代理到不了模型端点；
 // 宿主进程直连可用（与聊天一致），页面只访问 127.0.0.1，既绕开代理也没有 CORS 与密钥暴露。
 //
 // 路由（仅回环地址可访问）：
-//   GET  /learnmap/llm.json  -> { enabled, provider, model }
-//   POST /learnmap/labels    <- { items: [{ id, text, parent }] }
-//                            -> { names: { [id]: name }, error?: string }
+//   GET  /learnmap/llm.json   -> { enabled, provider, model, relate }
+//   POST /learnmap/labels     <- { items: [{ id, text, parent }] }
+//                             -> { names: { [id]: name }, error?: string }
+//   POST /learnmap/relations  <- { items: [{ id, seq, text, parent }] }
+//                             -> { parents: { [id]: parentId | 'root' }, error?: string }
 //
 // 配置在用户自己的 profile 补丁层：
 //   - id: learnmap
 //     config:
 //       provider: zai
 //       model: glm-5.3-flash
-//       apiKey: '...'     # 可选：ctx.llm 不可用时的直连兜底
+//       relate: true       # false = 不做 LLM 关系复核（仍用规则关系）
+//       apiKey: '...'      # 可选：ctx.llm 不可用时的直连兜底
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 const ROUTE_CONFIG = '/learnmap/llm.json'
 const ROUTE_LABELS = '/learnmap/labels'
+const ROUTE_RELATIONS = '/learnmap/relations'
 const DEFAULT_PROVIDER = 'zai'
 const DEFAULT_MODEL = 'glm-5.3-flash'
 const DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4'
 const BATCH = 8
 const MAX_ITEMS = 40
+const MAX_RELATION_ITEMS = 80
 const MAX_BODY = 64 * 1024
 const CALL_TIMEOUT_MS = 25000
 const CACHE_LIMIT = 500
@@ -44,6 +49,19 @@ const NAMING_SYSTEM = [
   '4. 若 q 只是承接上文的半句（如「那微任务呢」），必须把 parent 的主题补进名字，形成「主题 + 侧重点」，例如「EventLoop 微任务」；但不要照抄 parent。',
   '5. 若 q 是宽泛的开场提问（如「开始讲讲 X」），用能概括该主题的完整名词，例如「X 整体结构与学习路径」。',
   '只输出 JSON 数组，形如 [{"i":0,"name":"..."}]，不要任何解释或代码块。'
+].join('\n')
+
+const RELATION_SYSTEM = [
+  '你在整理一段技术问答会话的知识树。',
+  '输入是一个按时间排序的节点数组，每个节点有：id（节点 id）、seq（序号）、q（提问原文）、parent（当前规则父节点 id，或 "root"）。',
+  '任务：检查每个节点的直接父节点在主题从属关系上是否合理，并修正明显错误。',
+  '规则：',
+  '1. 父节点必须是数组中 seq 更小的节点，或者 "root"（顶层并列主题）。不能指向自己或更晚的节点。',
+  '2. 只在有把握时修改；不确定就保持 parent 不变，也不要在结果里输出这个节点。',
+  '3. 相邻序号不代表从属关系：同一主题下的并列问题应挂到同一个父节点，不要串成一条链。',
+  '4. 「它」「这个」「那……呢」「继续」这类承接上文的追问，挂到上文对应的那个具体节点。',
+  '5. 同一层里主题并列、互不包含的节点，父节点相同或都用 "root"。',
+  '只输出 JSON 对象：{"parents":{"<节点 id>":"<父节点 id 或 root>"}}，只包含你要修改的节点；不要解释、不要代码块。'
 ].join('\n')
 
 /** 稳定的短哈希（djb2），按提问文本缓存命名。 */
@@ -96,6 +114,33 @@ function chunk(list, size) {
   const out = []
   for (let index = 0; index < list.length; index += size) out.push(list.slice(index, index + size))
   return out
+}
+
+/** 宽容解析关系回复：只取第一个 JSON 对象里的 parents 表。 */
+function parseRelations(text) {
+  const raw = String(text || '')
+  const start = raw.indexOf('{')
+  const end = raw.lastIndexOf('}')
+  if (start < 0 || end <= start) return {}
+  let parsed
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1))
+  } catch (error) {
+    return {}
+  }
+  const table = parsed && parsed.parents && typeof parsed.parents === 'object' ? parsed.parents : {}
+  const pairs = Array.isArray(table) ? table : Object.keys(table).map(id => ({ id, parent: table[id] }))
+  const parents = {}
+  for (const item of pairs) {
+    if (!item || typeof item !== 'object') continue
+    const id = item.id
+    const parent = item.parent
+    if (typeof id !== 'string' || typeof parent !== 'string') continue
+    const value = parent.trim()
+    if (value === '') continue
+    parents[id] = value
+  }
+  return parents
 }
 
 function readBody(req) {
@@ -152,15 +197,15 @@ function createLabelCache(file) {
   }
 }
 
-/** 一次模型调用：优先 `ctx.llm`（与聊天一条通路），失败再直连兜底。 */
-async function callModel(ctx, options, batch) {
-  const userPayload = JSON.stringify(
-    batch.map((item, index) => ({
-      i: index,
-      q: String(item.text || '').slice(0, 400),
-      parent: item.parent ? String(item.parent).slice(0, 120) : ''
-    }))
-  )
+/**
+ * 一次模型调用：优先 `ctx.llm`（与聊天一条通路），失败再直连兜底。
+ * @param ctx - 宿主上下文。
+ * @param options - `{ provider, model, baseUrl, apiKey }`。
+ * @param request - `{ system, payload, temperature, maxTokens, parse }`；parse 返回非空对象才算成功。
+ * @returns parser 的结果。
+ */
+async function callChat(ctx, options, request) {
+  const { system, payload, temperature, maxTokens, parse } = request
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), CALL_TIMEOUT_MS)
   try {
@@ -169,10 +214,10 @@ async function callModel(ctx, options, batch) {
       const stream = llm.stream({
         provider: options.provider,
         model: options.model,
-        system: NAMING_SYSTEM,
-        messages: [{ role: 'user', content: [{ type: 'text', text: userPayload }] }],
-        temperature: 0.3,
-        maxTokens: 900,
+        system,
+        messages: [{ role: 'user', content: [{ type: 'text', text: payload }] }],
+        temperature,
+        maxTokens,
         signal: controller.signal
       })
       let text = ''
@@ -183,8 +228,8 @@ async function callModel(ctx, options, batch) {
           throw new Error((chunkItem.reason.failure && chunkItem.reason.failure.message) || 'model error')
         }
       }
-      const names = parseNames(text)
-      if (Object.keys(names).length > 0) return names
+      const parsed = parse(text)
+      if (Object.keys(parsed).length > 0) return parsed
       throw new Error('empty completion')
     }
     throw new Error('llm service unavailable')
@@ -197,12 +242,12 @@ async function callModel(ctx, options, batch) {
       body: JSON.stringify({
         model: options.model,
         thinking: { type: 'disabled' },
-        temperature: 0.3,
-        max_tokens: 900,
+        temperature,
+        max_tokens: maxTokens,
         stream: false,
         messages: [
-          { role: 'system', content: NAMING_SYSTEM },
-          { role: 'user', content: userPayload }
+          { role: 'system', content: system },
+          { role: 'user', content: payload }
         ]
       }),
       signal: controller.signal
@@ -210,10 +255,47 @@ async function callModel(ctx, options, batch) {
     if (!res.ok) throw new Error('HTTP ' + res.status)
     const json = await res.json()
     const message = json && json.choices && json.choices[0] && json.choices[0].message
-    return parseNames(message ? message.content : '')
+    return parse(message ? message.content : '')
   } finally {
     clearTimeout(timer)
   }
+}
+
+/** 为一批提问起名（返回 `{ 索引: 名字 }`）。 */
+function callModel(ctx, options, batch) {
+  const payload = JSON.stringify(
+    batch.map((item, index) => ({
+      i: index,
+      q: String(item.text || '').slice(0, 400),
+      parent: item.parent ? String(item.parent).slice(0, 120) : ''
+    }))
+  )
+  return callChat(ctx, options, {
+    system: NAMING_SYSTEM,
+    payload,
+    temperature: 0.3,
+    maxTokens: 900,
+    parse: parseNames
+  })
+}
+
+/** 复核整棵树的父子关系（返回 `{ [节点 id]: 父节点 id | 'root' }`，只含要改的）。 */
+function callRelations(ctx, options, items) {
+  const payload = JSON.stringify({
+    nodes: items.map(item => ({
+      id: item.id,
+      seq: item.seq,
+      q: String(item.text || '').slice(0, 300),
+      parent: item.parent || 'root'
+    }))
+  })
+  return callChat(ctx, options, {
+    system: RELATION_SYSTEM,
+    payload,
+    temperature: 0.2,
+    maxTokens: 1400,
+    parse: parseRelations
+  })
 }
 
 /**
@@ -233,7 +315,8 @@ export function apply(ctx, config) {
     model: str(raw.model, DEFAULT_MODEL),
     baseUrl: str(raw.baseUrl, DEFAULT_BASE_URL),
     apiKey: str(raw.apiKey, ''),
-    enabled: raw.enabled !== false
+    enabled: raw.enabled !== false,
+    relate: raw.relate !== false
   }
   if (!ctx || typeof ctx.inject !== 'function') return
 
@@ -241,7 +324,12 @@ export function apply(ctx, config) {
   const cache = createLabelCache(join(home, 'storages', 'learnmap', 'labels.json'))
   let queue = Promise.resolve()
 
-  const configPayload = JSON.stringify({ enabled: options.enabled, provider: options.provider, model: options.model })
+  const configPayload = JSON.stringify({
+    enabled: options.enabled,
+    provider: options.provider,
+    model: options.model,
+    relate: options.relate
+  })
 
   const respond = (res, status, payload) => {
     res.statusCode = status
@@ -349,6 +437,76 @@ export function apply(ctx, config) {
         }
       }),
       'learnmap: labels route'
+    )
+
+    // LLM 复核父子关系：只回环、只 POST。父节点必须更早这条约束由页面二次校验。
+    ctx.effect(
+      () =>
+        web.register({
+          kind: 'exact',
+          path: ROUTE_RELATIONS,
+          async handler(req, res) {
+            if (!isLoopback(req)) {
+              res.statusCode = 403
+              res.end('forbidden')
+              return
+            }
+            if (options.enabled !== true || options.relate !== true) {
+              respond(res, 200, { parents: {}, error: 'disabled' })
+              return
+            }
+            if (req.method !== 'POST') {
+              respond(res, 405, { parents: {}, error: 'POST required' })
+              return
+            }
+            let items
+            try {
+              const body = JSON.parse(await readBody(req))
+              items = body && Array.isArray(body.items) ? body.items : []
+            } catch (error) {
+              respond(res, 400, { parents: {}, error: 'bad json' })
+              return
+            }
+            const valid = items
+              .filter(item => item && typeof item.id === 'string' && typeof item.text === 'string' && item.text.trim() !== '')
+              .map(item => ({
+                id: item.id,
+                seq: Number.isFinite(item.seq) ? item.seq : 0,
+                text: item.text,
+                parent: typeof item.parent === 'string' && item.parent !== '' ? item.parent : 'root'
+              }))
+              .slice(0, MAX_RELATION_ITEMS)
+            if (valid.length < 2) {
+              respond(res, 200, { parents: {} })
+              return
+            }
+
+            const run = async () => {
+              try {
+                const got = await callRelations(ctx, options, valid)
+                const ids = new Set(valid.map(item => item.id))
+                const parents = {}
+                for (const id of Object.keys(got)) {
+                  if (!ids.has(id)) continue
+                  const parent = got[id]
+                  if (parent !== 'root' && !ids.has(parent)) continue
+                  if (parent === id) continue
+                  parents[id] = parent
+                }
+                return { parents }
+              } catch (error) {
+                return { parents: {}, error: String((error && error.message) || error) }
+              }
+            }
+            const pending = queue.then(run, run)
+            queue = pending.then(
+              () => undefined,
+              () => undefined
+            )
+            respond(res, 200, await pending)
+          }
+        }),
+      'learnmap: relations route'
     )
   })
 }
