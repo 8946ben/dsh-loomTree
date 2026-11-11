@@ -1,7 +1,7 @@
 # 学习分支图 · LoomTree
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.x-5b21b6)
-![tests](https://img.shields.io/badge/tests-131%20passing-2ea44f)
+![tests](https://img.shields.io/badge/tests-136%20passing-2ea44f)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 把 DeepSeek Harness 里的问答会话整理成一棵可编辑的知识点树：
@@ -86,15 +86,18 @@ git clone https://github.com/8946ben/dsh-loomTree.git
 | 滚轮 | 平移画板 |
 | `Ctrl` / `⌘` + 滚轮 | 以指针为锚点缩放（0.3×–1.8×） |
 | 双击空白 | 适宽并归位 |
-| 拖动节点 | 固定该节点位置，连线跟着走 |
+| 拖动节点 | 只移动这个节点，**不会触发整图缩放或重新排布** |
 | 双击节点 | 就地改名（`Enter` 提交 / `Esc` 取消） |
-| 拖节点底部圆点 → 另一个节点 | 改挂到目标节点下（目标会高亮） |
-| 拖节点底部圆点 → 空白处 | 断开父关系，节点变顶层 |
+| 拖节点底部圆点 → 目标节点 | 建立 **当前节点 → 目标节点** 的父子关系（目标顶部入点高亮） |
+| 拖节点底部圆点 → 空白处 | 取消连线，不改任何关系 |
 | 点击连线 | 选中（线变粗、变主题色） |
-| 选中后 `Delete` / `Backspace` / 顶栏「断开」 | 断开这条父子关系，子节点变顶层 |
+| 选中后 `Delete` / `Backspace` / 顶栏「断开」 | 删除这条父子关系，子节点变顶层 |
 | `Esc` | 取消选中 / 取消正在拖的连线 |
 | `重排` | 清掉手动关系与位置（**保留手动改名**），重新跑一遍：规则关系 + LLM 复核 |
 | `仅规则` | 清掉手动关系与位置（**保留手动改名**），只使用规则关系，本会话不再请 LLM 复核 |
+
+拖出连线时，所有卡片顶部会显示**入点**，合法目标的入点会高亮，预览线直接吸附到它的顶部；
+松手在目标卡片任意位置都算命中。拖动节点只改它自己的位置，不会触发整图重排。
 
 「重排 / 仅规则」都会把关系图恢复到“初始生成”的状态：手动拖过的父子关系、固定位置全部丢弃；
 **手动改过的名字会保留**。区别只在于「重排」会再跑一次 LLM 复核，「仅规则」不会。
@@ -164,12 +167,12 @@ DSH 的会话窗口是分页加载的，所以打开图时会自动向前补齐�
 | `client.js` | 浏览器半区：两个挂载点、建树、关系修正、布局、画板与样式 |
 | `cordis.patch.yml` | bundle 插入的插件行 |
 | `locale/`、`icon.svg` | 插件管理器的标题、描述与图标 |
-| `smoke-test.cjs` | 离线冒烟测试（131 条） |
+| `smoke-test.cjs` | 离线冒烟测试（136 条） |
 | `llm-smoke.cjs` | 命名链路自检 |
 
 ```bash
 node --check client.js
-node smoke-test.cjs        # 期望「全部通过」131 条
+node smoke-test.cjs        # 期望「全部通过」136 条
 ```
 
 改 `client.js` 后刷新页面（`Ctrl+R`）即可；改 `index.js` 需要重载插件行或重启应用。

@@ -247,7 +247,7 @@ if (graphEntry) {
 // 把 buildTree / layoutGraph 暴露出来做断言：在源码尾部临时追加导出。
 const probeSource = source.replace(
   'return { inject, apply }',
-  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __relationChanges: relationChanges, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
+  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __relationChanges: relationChanges, __canAdoptChild: canAdoptChild, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
 )
 loaded = null
 vm.runInContext(probeSource, sandbox, { filename: 'client-probe.js' })
@@ -439,6 +439,17 @@ if (typeof layoutGraph === 'function') {
       const changed = relationChanges(ruleChain, { r3: 'r1' })
       check('真正改挂会被记录', changed.r3 === 'r1' && Object.keys(changed).length === 1, JSON.stringify(changed))
       check('不存在的 id 不计入变更', Object.keys(relationChanges(ruleChain, { nope: 'r1' })).length === 0)
+    }
+
+    // 连线方向：从 A 的输出拖到 B，是把 B 挂到 A 下；只拒绝自己/祖先造成的环
+    const canAdoptChild = probe.__canAdoptChild
+    check('探针可取到 canAdoptChild', typeof canAdoptChild === 'function')
+    if (typeof canAdoptChild === 'function') {
+      const adoptTree = [{ id: 'p', children: [{ id: 'c', children: [{ id: 'g', children: [] }] }] }]
+      check('可以把孙节点直接挂到父节点下', canAdoptChild(adoptTree, 'p', 'g') === true)
+      check('不能把祖先挂到自己的子孙下', canAdoptChild(adoptTree, 'g', 'p') === false)
+      check('不能挂到自己', canAdoptChild(adoptTree, 'p', 'p') === false)
+      check('不存在的目标节点不允许', canAdoptChild(adoptTree, 'p', 'nope') === false)
     }
   }
 

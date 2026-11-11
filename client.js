@@ -523,7 +523,9 @@ window.__ModuleLoader__.load({
 			}, [tree, llmConfig])
 
 			// 规则树变化 → 防抖后请模型复核关系；节点集合不变时 driveRelations 内部直接跳过。
-			// 一旦用户手动改过关系，就完全让位给人工布局（清掉之前的 LLM 修正，避免两套关系打架）。
+			// 注意：**不要**把 edits.version 放进依赖——只拖动位置/改名也会触发 effect，
+			// 一次迟到的 LLM 结果会把用户刚摆好的关系改掉，看起来就像“挪一下节点，父子关系变了”。
+			// 手动改关系时由 onLinkPointerUp / detachEdge 显式让位给人工。
 			useEffect(() => {
 				if (!llmConfig || llmConfig.relate === false) return undefined
 				if (relationsStore.ruleOnly) return undefined
@@ -535,7 +537,7 @@ window.__ModuleLoader__.load({
 					driveRelations(baseTree, llmConfig)
 				}, 900)
 				return () => clearTimeout(timer)
-			}, [baseTree, llmConfig, edits.version, relations.ruleOnly])
+			}, [baseTree, llmConfig, relations.ruleOnly])
 
 			/** 「重排」用：清空 LLM 覆盖层并强制重新复核（绕过签名/缓存）。 */
 			const rerunRelations = useCallback(() => {
@@ -949,6 +951,9 @@ window.__ModuleLoader__.load({
 			'.lm-gnode{position:absolute;display:flex;align-items:center;box-sizing:border-box;border:1.5px solid color-mix(in srgb,var(--dsw-alias-label-secondary) 32%,var(--dsw-alias-border-l2));border-radius:11px;background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 78%,transparent);backdrop-filter:blur(10px) saturate(1.04);-webkit-backdrop-filter:blur(10px) saturate(1.04);box-shadow:0 5px 16px rgba(15,23,42,.10),inset 0 1px 0 rgba(255,255,255,.32);overflow:visible;touch-action:none;cursor:grab;user-select:none;transition:box-shadow .2s ease,transform .2s ease,border-color .2s ease,background .2s ease}',
 			'.lm-gnode:hover{border-color:color-mix(in srgb,var(--dsw-alias-label-secondary) 55%,var(--dsw-alias-border-l2));box-shadow:0 9px 22px rgba(15,23,42,.16),inset 0 1px 0 rgba(255,255,255,.4)}',
 			'.lm-gnode-link-target{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 2px color-mix(in srgb,var(--dsw-alias-brand-primary) 55%,transparent),0 8px 22px rgba(15,23,42,.18)}',
+			'.lm-gnode-in{position:absolute;left:50%;top:-6px;width:11px;height:11px;margin-left:-5.5px;box-sizing:border-box;border-radius:50%;border:1.5px solid color-mix(in srgb,var(--dsw-alias-label-secondary) 65%,transparent);background:transparent;pointer-events:none;opacity:0;transition:opacity .15s,border-color .15s,box-shadow .15s}',
+			'.lm-gnode:hover .lm-gnode-in,.lm-linking .lm-gnode-in{opacity:.7;pointer-events:auto}',
+			'.lm-gnode-link-target .lm-gnode-in{opacity:1;border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary) 25%,transparent)}',
 			'.lm-gnode-dragging{cursor:grabbing;z-index:6;box-shadow:0 14px 30px rgba(0,0,0,.28);border-color:var(--dsw-alias-brand-primary);transform:none}',
 			'.lm-gnode-label{flex:1;min-width:0;display:block;padding:0 28px;overflow:hidden;white-space:normal;word-break:break-word;line-height:20px;font-size:15px;font-weight:500;letter-spacing:.3px}',
 			'.lm-gnode-input{flex:1;min-width:0;height:calc(100% - 6px);margin:3px 8px;box-sizing:border-box;border:1px solid var(--dsw-alias-brand-primary);border-radius:7px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;padding:0 6px}',
@@ -1828,6 +1833,38 @@ function shrinkImage(file, maxSize, quality) {
 			return { done: false, reason: '' }
 		}
 
+		/**
+		 * 连线的环检测：把 childId 挂到 parentId 下是否合法。
+		 * 不能挂自己；parent 也不能是 child 的子孙（否则成环）。纯函数，便于测试。
+		 * @param roots - 当前树的根数组。
+		 * @param parentId - 要当父节点的 id。
+		 * @param childId - 要改挂的节点 id。
+		 * @returns 是否允许。
+		 */
+		function canAdoptChild(roots, parentId, childId) {
+			if (!parentId || !childId || parentId === childId) return false
+			const find = (nodes, id) => {
+				for (const node of nodes || []) {
+					if (node.id === id) return node
+					const hit = find(node.children, id)
+					if (hit) return hit
+				}
+				return null
+			}
+			const list = roots || []
+			if (!find(list, parentId) || !find(list, childId)) return false
+			const child = find(list, childId)
+			const stack = [child]
+			while (stack.length > 0) {
+				const node = stack.pop()
+				for (const kid of node.children || []) {
+					if (kid.id === parentId) return false
+					stack.push(kid)
+				}
+			}
+			return true
+		}
+
 		/** 侧栏图的标签正文。 */
 		function GraphBody(props) {
 			if (typeof props.sessionId !== 'string' || props.sessionId === '' || typeof props.useSession !== 'function') {
@@ -1939,6 +1976,8 @@ function shrinkImage(file, maxSize, quality) {
 				const positions = {}
 				for (const [id, point] of placed.map) positions[id] = { x: point.x, y: point.y }
 				editStore.setPositions(positions)
+				// 手动动过布局后，自动适宽不能再抢方向盘（否则拖动节点会突然整图缩放/归位）。
+				setManualZoom(true)
 			}, [placed])
 
 			/** 真实父子连线（带箭头）与拖拽中的预览线分开存，预览线是虚线、不带箭头。 */
@@ -1958,8 +1997,18 @@ function shrinkImage(file, maxSize, quality) {
 				if (!from) return null
 				const x1 = from.x + from.w / 2
 				const y1 = from.y + from.h
-				return `M${x1},${y1} C${x1},${y1 + 30} ${linking.x},${linking.y - 30} ${linking.x},${linking.y}`
-			}, [placed, linking])
+				// 悬停在合法目标上时，预览线直接吸到它的顶部入点，给出“会挂到这里”的反馈。
+				let x2 = linking.x
+				let y2 = linking.y
+				if (linkTarget) {
+					const target = placed.map.get(linkTarget)
+					if (target) {
+						x2 = target.x + target.w / 2
+						y2 = target.y
+					}
+				}
+				return `M${x1},${y1} C${x1},${y1 + 30} ${x2},${y2 - 30} ${x2},${y2}`
+			}, [placed, linking, linkTarget])
 
 			const labelOf = useCallback(
 				id => {
@@ -1974,24 +2023,8 @@ function shrinkImage(file, maxSize, quality) {
 				setTimeout(() => setNote(null), 4000)
 			}, [])
 
-			/** 能否把 from 挂到 targetId 下：不能挂自己、不能挂到自己的子孙（成环）。 */
-			const canLink = useCallback(
-				(fromId, targetId) => {
-					if (!targetId || targetId === fromId) return false
-					const start = nodeById.get(fromId)
-					if (!start) return false
-					const stack = [start]
-					while (stack.length > 0) {
-						const node = stack.pop()
-						for (const kid of node.children || []) {
-							if (kid.id === targetId) return false
-							stack.push(kid)
-						}
-					}
-					return true
-				},
-				[nodeById]
-			)
+			/** 从 parent 的输出拖到 child：能否把 child 挂到 parent 下（不能自己 / 不能成环）。 */
+			const canAdopt = useCallback((parentId, childId) => canAdoptChild(tree.roots, parentId, childId), [tree])
 
 			/** 断开一条连线：子节点提为顶层；先钉住当前布局，避免整棵树突然重排。 */
 			const detachEdge = useCallback(
@@ -2003,6 +2036,7 @@ function shrinkImage(file, maxSize, quality) {
 						return
 					}
 					pinLayout()
+					relationsStore.patch({ parents: {}, signature: null, status: 'idle', error: null })
 					editStore.setParent(edge.to, null)
 					setSelectedEdge(null)
 					flashNote('已断开「' + labelOf(edge.to) + '」的父连线；点「重排」恢复自动排列。')
@@ -2193,6 +2227,7 @@ function shrinkImage(file, maxSize, quality) {
 				editStore.resetGraph(allIds())
 				setEditing(null)
 				setCollapsed({})
+				setManualZoom(false)
 				if (llmConfig && llmConfig.relate !== false) {
 					flashNote('已清除手动关系与布局，重新跑规则 + LLM 复核…')
 					rerunRelations()
@@ -2210,6 +2245,7 @@ function shrinkImage(file, maxSize, quality) {
 				editStore.resetGraph(allIds())
 				setEditing(null)
 				setCollapsed({})
+				setManualZoom(false)
 				showRuleOnly()
 				flashNote('已清除手动关系与布局，仅使用规则关系。')
 			}, [allIds, flashNote, showRuleOnly])
@@ -2325,6 +2361,8 @@ function shrinkImage(file, maxSize, quality) {
 				const dy = (event.clientY - drag.startY) / zoom
 				setDragging(null)
 				if (drag.moved) {
+					// 拖动节点 = 手动布局：先关掉自动适宽，避免提交位置后整图缩放/归位。
+					setManualZoom(true)
 					editStore.setPosition(drag.id, { x: drag.originX + dx, y: drag.originY + dy })
 					return
 				}
@@ -2355,7 +2393,7 @@ function shrinkImage(file, maxSize, quality) {
 				const point = toCanvas(event.clientX, event.clientY)
 				setLinking(current => (current ? { from: current.from, x: point.x, y: point.y } : current))
 				const targetId = linkTargetAt(event)
-				const next = canLink(linkRef.current, targetId) ? targetId : null
+				const next = canAdopt(linkRef.current, targetId) ? targetId : null
 				setLinkTarget(current => (current === next ? current : next))
 			}
 			const onLinkPointerUp = event => {
@@ -2366,23 +2404,24 @@ function shrinkImage(file, maxSize, quality) {
 				setLinkTarget(null)
 				const targetId = linkTargetAt(event)
 				if (targetId === null || targetId === '') {
-					// 拖到空白 = 断开父连线，节点提为顶层；先钉住布局避免整棵树重排。
-					pinLayout()
-					editStore.setParent(from, null)
-					flashNote('已断开父连线，提为顶层；点「重排」恢复自动排列。')
+					// 和 draw.io 一样：拖到空白 = 取消，不偷偷改关系。
+					flashNote('已取消连线；要断开某条父子关系，请点选连线后按 Delete。')
 					return
 				}
 				if (targetId === from) {
 					flashNote('不能把节点挂到自己身上。')
 					return
 				}
-				if (!canLink(from, targetId)) {
-					flashNote('不能挂到自己的子节点下（会形成环）。')
+				if (!canAdopt(from, targetId)) {
+					flashNote('不能把祖先节点挂到它自己的子孙下（会形成环）。')
 					return
 				}
 				pinLayout()
-				editStore.setParent(from, targetId)
-				flashNote('已把「' + labelOf(from) + '」挂到「' + labelOf(targetId) + '」下，并固定当前布局。')
+				// 一旦人工改关系，LLM 覆盖层整体让位，避免“人工一套 + 模型一套”混在一起。
+				relationsStore.patch({ parents: {}, signature: null, status: 'idle', error: null })
+				// 从 A 的底部输出拖到 B：A 是父、B 是子（和箭头方向一致）。
+				editStore.setParent(targetId, from)
+				flashNote('已把「' + labelOf(targetId) + '」挂到「' + labelOf(from) + '」下，并固定当前布局。')
 			}
 
 			// ---- 双击改名 ----
@@ -2455,7 +2494,7 @@ function shrinkImage(file, maxSize, quality) {
 			const hint = h(
 				'div',
 				{ className: 'lm-graph-hint' },
-				'拖空白 / 中键平移 · Ctrl+滚轮缩放 · 双击空白适宽 · 拖节点改位置 · 双击节点改名 · 拖底部圆点改父子关系 · 点连线选中后 Delete 断开'
+				'拖空白 / 中键平移 · Ctrl+滚轮缩放 · 双击空白适宽 · 拖节点改位置 · 双击节点改名 · 拖底部圆点到目标 = 把目标挂到当前节点下 · 点连线选中后 Delete 断开'
 			)
 
 
@@ -2784,6 +2823,7 @@ function shrinkImage(file, maxSize, quality) {
 								onPointerUp: onNodePointerUp,
 								onDoubleClick: () => startRename(item.node)
 							},
+							h('span', { className: 'lm-gnode-in', 'aria-hidden': 'true' }),
 							isEditing
 								? h('input', {
 										className: 'lm-gnode-input',
@@ -2821,8 +2861,8 @@ function shrinkImage(file, maxSize, quality) {
 								? h('button', {
 										type: 'button',
 										className: 'lm-gnode-link',
-										title: '拖到另一个节点：改父子关系；拖到空白处：提为根',
-										'aria-label': '拖拽改父子关系',
+										title: '从这里拖到目标节点：把目标挂到当前节点下（拖到空白取消）',
+										'aria-label': '拖拽把目标挂到当前节点下',
 										onPointerDown: event => onLinkPointerDown(event, id),
 										onPointerMove: onLinkPointerMove,
 										onPointerUp: onLinkPointerUp
@@ -2835,7 +2875,7 @@ function shrinkImage(file, maxSize, quality) {
 
 			return h(
 				'div',
-				{ className: 'lm-graph' + (board.mode === 'image' && board.image ? ' lm-graph-image' : '') },
+				{ className: 'lm-graph' + (board.mode === 'image' && board.image ? ' lm-graph-image' : '') + (linking !== null ? ' lm-linking' : '') },
 				header,
 				settingsBackdrop,
 				settings,
