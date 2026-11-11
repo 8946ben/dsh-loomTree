@@ -399,8 +399,21 @@ if (typeof layoutGraph === 'function') {
     const detached = applyLlmParents(ruleChain, { r2: 'root' })
     check('root 建议会把节点提为顶层', detached.roots.some((node) => node.id === 'r2'), JSON.stringify(detached.roots.map((node) => node.id)))
 
-    const later = applyLlmParents(ruleChain, { r1: 'r3' })
-    check('指向更晚节点的建议被忽略', later === ruleChain)
+    // 允许挂到「更晚」的节点（知识树按主题，不按提问时间），只要不成环
+    const twoRoots = {
+      roots: [
+        ruleChain.roots[0],
+        { id: 'r9', seq: 9, text: '后问的总体概览', label: '总体概览', children: [] }
+      ],
+      count: 4,
+      latestId: 'r9'
+    }
+    const crossTime = applyLlmParents(twoRoots, { r1: 'r9' })
+    const crossParent = crossTime.roots.find((node) => node.id === 'r9')
+    check('可以挂到更晚的父节点', !!crossParent && crossParent.children.some((node) => node.id === 'r1'), JSON.stringify(crossTime.roots.map((node) => node.id)))
+
+    const cyclic = applyLlmParents(ruleChain, { r1: 'r3' })
+    check('成环的建议被忽略（退回原关系）', cyclic === ruleChain)
 
     const missing = applyLlmParents(ruleChain, { r2: 'nope' })
     check('指向不存在节点的建议被忽略', missing === ruleChain)

@@ -57,7 +57,7 @@ const RELATION_SYSTEM = [
   '输入是一个按时间排序的节点数组，每个节点有：id（节点 id）、seq（序号）、q（提问原文）、parent（当前规则父节点 id，或 "root"）。',
   '任务：检查每个节点的直接父节点在主题从属关系上是否合理，并修正明显错误。',
   '规则：',
-  '1. 父节点必须是数组中 seq 更小的节点，或者 "root"（顶层并列主题）。不能指向自己或更晚的节点。',
+  '1. 父节点可以是数组里任意一个节点（不必更早），也可以写 "root" 表示顶层并列主题；不能指向自己、不能形成环。',
   '2. 先判断子节点的主题是否被父节点主题包含：并列、交叉、只共享关键词，都不算父子，应该挂到它们的共同祖先。',
   '3. 若子节点问题里出现了父节点问题中没有的核心术语（父节点讲「扩散草稿」，子节点讲「特征级自回归草稿」），通常说明二者并列，应挂到共同祖先。',
   '4. 相邻序号不代表从属关系：同一主题下的并列问题应挂到同一个父节点，不要串成一条链。',
@@ -322,7 +322,7 @@ export function apply(ctx, config) {
     baseUrl: str(raw.baseUrl, DEFAULT_BASE_URL),
     apiKey: str(raw.apiKey, ''),
     enabled: raw.enabled !== false,
-    relate: raw.relate !== false
+    relate: raw.relate === true
   }
   if (!ctx || typeof ctx.inject !== 'function') return
 

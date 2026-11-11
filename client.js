@@ -522,13 +522,18 @@ window.__ModuleLoader__.load({
 			}, [tree, llmConfig])
 
 			// 规则树变化 → 防抖后请模型复核关系；节点集合不变时 driveRelations 内部直接跳过。
+			// 一旦用户手动改过关系，就完全让位给人工布局（清掉之前的 LLM 修正，避免两套关系打架）。
 			useEffect(() => {
 				if (!llmConfig || llmConfig.relate === false) return undefined
+				if (Object.keys(editStore.parents).length > 0) {
+					if (Object.keys(relationsStore.parents).length > 0) relationsStore.patch({ parents: {}, signature: null, status: 'idle', error: null })
+					return undefined
+				}
 				const timer = setTimeout(() => {
 					driveRelations(baseTree, llmConfig)
 				}, 900)
 				return () => clearTimeout(timer)
-			}, [baseTree, llmConfig])
+			}, [baseTree, llmConfig, edits.version])
 
 			const displayNames = useMemo(() => {
 				const cache = readLabelCache()
@@ -906,6 +911,7 @@ window.__ModuleLoader__.load({
 			'.lm-graph-tools{display:flex;align-items:center;flex-wrap:wrap;gap:1px;margin-left:auto;background:rgba(127,127,127,.10);border-radius:9px;padding:2px}',
 			'.lm-tool{border:none;background:transparent;color:var(--dsw-alias-label-secondary);border-radius:7px;padding:2px 8px;font:inherit;font-size:11px;line-height:18px;cursor:pointer;transition:background .12s,color .12s}',
 			'.lm-tool:hover{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}',
+			'.lm-tool:disabled{opacity:.35;cursor:default;background:transparent;color:var(--dsw-alias-label-secondary)}',
 			'.lm-tool-zoom{min-width:46px;text-align:center;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}',
 			'.lm-tool-sep{width:1px;height:14px;background:var(--dsw-alias-border-l1);margin:0 3px}',
 			'.lm-graph-scroll{flex:1;min-height:280px;overflow:hidden;position:relative;touch-action:none;user-select:none;cursor:grab}',
@@ -917,8 +923,11 @@ window.__ModuleLoader__.load({
 			'.lm-graph-edge{stroke-opacity:.9}',
 			'.lm-graph-edges path.lm-arrow-head{fill:var(--dsw-alias-label-secondary);stroke:none}',
 			'.lm-graph-edges path.lm-graph-link{stroke:var(--dsw-alias-brand-primary);stroke-dasharray:5 4}',
+			'.lm-edge-hit{fill:none;stroke:transparent;stroke-width:14;pointer-events:stroke;cursor:pointer}',
+			'.lm-graph-edge.lm-edge-selected{stroke:var(--dsw-alias-brand-primary);stroke-opacity:1;stroke-width:2.6}',
 			'.lm-gnode{position:absolute;display:flex;align-items:center;box-sizing:border-box;border:1.5px solid color-mix(in srgb,var(--dsw-alias-label-secondary) 32%,var(--dsw-alias-border-l2));border-radius:11px;background:color-mix(in srgb,var(--dsw-alias-bg-layer-1) 78%,transparent);backdrop-filter:blur(10px) saturate(1.04);-webkit-backdrop-filter:blur(10px) saturate(1.04);box-shadow:0 5px 16px rgba(15,23,42,.10),inset 0 1px 0 rgba(255,255,255,.32);overflow:visible;touch-action:none;cursor:grab;user-select:none;transition:box-shadow .2s ease,transform .2s ease,border-color .2s ease,background .2s ease}',
 			'.lm-gnode:hover{border-color:color-mix(in srgb,var(--dsw-alias-label-secondary) 55%,var(--dsw-alias-border-l2));box-shadow:0 9px 22px rgba(15,23,42,.16),inset 0 1px 0 rgba(255,255,255,.4)}',
+			'.lm-gnode-link-target{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 2px color-mix(in srgb,var(--dsw-alias-brand-primary) 55%,transparent),0 8px 22px rgba(15,23,42,.18)}',
 			'.lm-gnode-dragging{cursor:grabbing;z-index:6;box-shadow:0 14px 30px rgba(0,0,0,.28);border-color:var(--dsw-alias-brand-primary);transform:none}',
 			'.lm-gnode-label{flex:1;min-width:0;display:block;padding:0 28px;overflow:hidden;white-space:normal;word-break:break-word;line-height:20px;font-size:15px;font-weight:500;letter-spacing:.3px}',
 			'.lm-gnode-input{flex:1;min-width:0;height:calc(100% - 6px);margin:3px 8px;box-sizing:border-box;border:1px solid var(--dsw-alias-brand-primary);border-radius:7px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;padding:0 6px}',
@@ -1069,6 +1078,19 @@ window.__ModuleLoader__.load({
 			setPosition(id, position) {
 				if (!position) delete this.positions[id]
 				else this.positions[id] = { x: Math.round(position.x), y: Math.round(position.y) }
+				this.save()
+				this.emit()
+			},
+			/** 批量固定坐标：手动连线时冻结当前布局，避免整棵树重排。 */
+			setPositions(positions) {
+				let changed = false
+				for (const id of Object.keys(positions || {})) {
+					const point = positions[id]
+					if (!point) continue
+					this.positions[id] = { x: Math.round(point.x), y: Math.round(point.y) }
+					changed = true
+				}
+				if (!changed) return
 				this.save()
 				this.emit()
 			},
@@ -1267,8 +1289,9 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * 应用 LLM 给的父子关系修正。只接受指向更早节点的建议（从结构上不可能成环），
-		 * `root` 表示提为顶层；手动编辑在之后应用，所以人工关系永远优先。
+		 * 应用 LLM 给的父子关系修正。不要求父节点更早（知识树按主题从属，不按提问时间），
+		 * 但会做环检测：指向自己 / 形成环 / 父节点不存在的建议一律回退到原关系。
+		 * 手动编辑在之后应用，所以人工关系永远优先。
 		 * @param tree - 规则树。
 		 * @param parents - `{ [id]: parentId | 'root' }`。
 		 * @returns 新树；没有有效修改时原样返回。
@@ -1277,30 +1300,41 @@ window.__ModuleLoader__.load({
 			if (!tree || tree.count === 0 || !parents) return tree
 			if (Object.keys(parents).length === 0) return tree
 			const entries = flattenTree(tree.roots)
-			const order = new Map()
-			const seqOf = new Map()
-			entries.forEach((entry, index) => {
-				order.set(entry.node.id, index)
-				seqOf.set(entry.node.id, entry.node.seq || 0)
-			})
+			const known = new Set()
+			const original = new Map()
+			for (const entry of entries) {
+				known.add(entry.node.id)
+				original.set(entry.node.id, entry.parentId)
+			}
 			const chosen = new Map()
-			let changed = false
 			for (const entry of entries) {
 				const current = entry.parentId
 				let next = current
 				if (Object.prototype.hasOwnProperty.call(parents, entry.node.id)) {
 					const raw = parents[entry.node.id]
-					if (raw === 'root') {
-						next = null
-					} else if (typeof raw === 'string' && raw !== entry.node.id && order.has(raw)) {
-						const rawSeq = seqOf.get(raw) || 0
-						const selfSeq = seqOf.get(entry.node.id) || 0
-						const earlier = rawSeq < selfSeq || (rawSeq === selfSeq && order.get(raw) < order.get(entry.node.id))
-						if (earlier) next = raw
-					}
+					if (raw === 'root') next = null
+					else if (typeof raw === 'string' && raw !== entry.node.id && known.has(raw)) next = raw
 				}
 				chosen.set(entry.node.id, next)
-				if (next !== current) changed = true
+			}
+			// 环检测：沿改写后的父链上溯；绕回自己或指向不存在的节点就回退原关系。
+			const effective = id => (chosen.has(id) ? chosen.get(id) : original.get(id))
+			const acyclic = id => {
+				let cursor = chosen.get(id)
+				let guard = 0
+				while (cursor !== null && cursor !== undefined && guard < 256) {
+					if (cursor === id) return false
+					if (!known.has(cursor)) return false
+					cursor = effective(cursor)
+					guard += 1
+				}
+				return true
+			}
+			let changed = false
+			for (const entry of entries) {
+				const id = entry.node.id
+				if (chosen.get(id) !== original.get(id) && !acyclic(id)) chosen.set(id, original.get(id))
+				if (chosen.get(id) !== original.get(id)) changed = true
 			}
 			if (!changed) return tree
 
@@ -1746,6 +1780,8 @@ function shrinkImage(file, maxSize, quality) {
 			const [pickedId, setPickedId] = useState(null)
 			const [dragging, setDragging] = useState(null) // { id, x, y } 拖动中的临时坐标
 			const [linking, setLinking] = useState(null) // { from, x, y } 正在改父子关系的连线
+			const [linkTarget, setLinkTarget] = useState(null) // 连线拖拽时悬停的合法目标节点
+			const [selectedEdge, setSelectedEdge] = useState(null) // { from, to } 点选中的连线
 			const [editing, setEditing] = useState(null) // { id, value } 正在改名的节点
 			const [note, setNote] = useState(null)
 			// 首次打开侧栏图时补齐「更早的问答」：DSH 的事件窗口是分页的（≥50 条消息 / ≥2 个 turn），
@@ -1833,13 +1869,20 @@ function shrinkImage(file, maxSize, quality) {
 				// editVersion：拖动提交后重新取固定坐标
 			}, [layout, editVersion])
 
+			/** 手动改关系前先把当前坐标钉住：连线/断开时不再整棵树重排，像画板一样稳定。 */
+			const pinLayout = useCallback(() => {
+				const positions = {}
+				for (const [id, point] of placed.map) positions[id] = { x: point.x, y: point.y }
+				editStore.setPositions(positions)
+			}, [placed])
+
 			/** 真实父子连线（带箭头）与拖拽中的预览线分开存，预览线是虚线、不带箭头。 */
 			const edges = useMemo(() => {
 				const out = []
 				for (const pair of layout.pairs) {
 					const from = placed.map.get(pair.from)
 					const to = placed.map.get(pair.to)
-					if (from && to) out.push(edgePath(from, to, board.edgeStyle))
+					if (from && to) out.push({ path: edgePath(from, to, board.edgeStyle), from: pair.from, to: pair.to })
 				}
 				return out
 			}, [layout, placed, board.edgeStyle])
@@ -1865,6 +1908,68 @@ function shrinkImage(file, maxSize, quality) {
 				setNote(text)
 				setTimeout(() => setNote(null), 4000)
 			}, [])
+
+			/** 能否把 from 挂到 targetId 下：不能挂自己、不能挂到自己的子孙（成环）。 */
+			const canLink = useCallback(
+				(fromId, targetId) => {
+					if (!targetId || targetId === fromId) return false
+					const start = nodeById.get(fromId)
+					if (!start) return false
+					const stack = [start]
+					while (stack.length > 0) {
+						const node = stack.pop()
+						for (const kid of node.children || []) {
+							if (kid.id === targetId) return false
+							stack.push(kid)
+						}
+					}
+					return true
+				},
+				[nodeById]
+			)
+
+			/** 断开一条连线：子节点提为顶层；先钉住当前布局，避免整棵树突然重排。 */
+			const detachEdge = useCallback(
+				edge => {
+					if (!edge) return
+					const entry = flattenTree(tree.roots).find(item => item.node.id === edge.to)
+					if (!entry || entry.parentId !== edge.from) {
+						setSelectedEdge(null)
+						return
+					}
+					pinLayout()
+					editStore.setParent(edge.to, null)
+					setSelectedEdge(null)
+					flashNote('已断开「' + labelOf(edge.to) + '」的父连线；点「重排」恢复自动排列。')
+				},
+				[tree, pinLayout, labelOf, flashNote]
+			)
+
+			// 点击连线选中后，Delete / Backspace 断开；Esc 取消选中或取消正在拖的连线。
+			useEffect(() => {
+				if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+				const onKey = event => {
+					if (event.key === 'Escape') {
+						if (linkRef.current !== null) {
+							linkRef.current = null
+							setLinking(null)
+							setLinkTarget(null)
+						} else {
+							setSelectedEdge(null)
+						}
+						return
+					}
+					if (event.key !== 'Delete' && event.key !== 'Backspace') return
+					if (!selectedEdge) return
+					const active = typeof document !== 'undefined' ? document.activeElement : null
+					const tag = active && active.tagName ? String(active.tagName).toUpperCase() : ''
+					if (tag === 'INPUT' || tag === 'TEXTAREA' || (active && active.isContentEditable)) return
+					event.preventDefault()
+					detachEdge(selectedEdge)
+				}
+				window.addEventListener('keydown', onKey)
+				return () => window.removeEventListener('keydown', onKey)
+			}, [selectedEdge, detachEdge])
 
 			/** 真正的适宽动作：不改「手动缩放」标记。 */
 			const fitCore = useCallback(() => {
@@ -2042,6 +2147,7 @@ function shrinkImage(file, maxSize, quality) {
 				const middle = event.button === 1
 				const left = event.button === 0
 				if (!middle && !left) return
+				setSelectedEdge(null)
 				const target = event.target
 				const onNode = target && typeof target.closest === 'function' && target.closest('[data-lm-node]')
 				// 左键落在节点上交给节点自己拖；中键始终平移（也顺手压掉中键自动滚动）
@@ -2146,6 +2252,11 @@ function shrinkImage(file, maxSize, quality) {
 			}
 
 			// ---- 连线改父子关系：从节点底部圆点拖到目标节点（或空白处提为根） ----
+			const linkTargetAt = event => {
+				const hit = document.elementFromPoint(event.clientX, event.clientY)
+				const host = hit && typeof hit.closest === 'function' ? hit.closest('[data-lm-node]') : null
+				return host ? host.getAttribute('data-lm-node') : null
+			}
 			const onLinkPointerDown = (event, id) => {
 				if (event.button !== 0) return
 				event.stopPropagation()
@@ -2160,39 +2271,35 @@ function shrinkImage(file, maxSize, quality) {
 				if (linkRef.current === null) return
 				const point = toCanvas(event.clientX, event.clientY)
 				setLinking(current => (current ? { from: current.from, x: point.x, y: point.y } : current))
+				const targetId = linkTargetAt(event)
+				const next = canLink(linkRef.current, targetId) ? targetId : null
+				setLinkTarget(current => (current === next ? current : next))
 			}
 			const onLinkPointerUp = event => {
 				const from = linkRef.current
 				linkRef.current = null
 				if (from === null) return
 				setLinking(null)
-				const hit = document.elementFromPoint(event.clientX, event.clientY)
-				const host = hit && typeof hit.closest === 'function' ? hit.closest('[data-lm-node]') : null
-				const targetId = host ? host.getAttribute('data-lm-node') : null
+				setLinkTarget(null)
+				const targetId = linkTargetAt(event)
 				if (targetId === null || targetId === '') {
+					// 拖到空白 = 断开父连线，节点提为顶层；先钉住布局避免整棵树重排。
+					pinLayout()
 					editStore.setParent(from, null)
-					flashNote('已把「' + labelOf(from) + '」提为根节点。')
+					flashNote('已断开父连线，提为顶层；点「重排」恢复自动排列。')
 					return
 				}
 				if (targetId === from) {
 					flashNote('不能把节点挂到自己身上。')
 					return
 				}
-				const descendants = new Set()
-				const walk = node => {
-					for (const kid of node.children || []) {
-						descendants.add(kid.id)
-						walk(kid)
-					}
-				}
-				const fromNode = nodeById.get(from)
-				if (fromNode) walk(fromNode)
-				if (descendants.has(targetId)) {
+				if (!canLink(from, targetId)) {
 					flashNote('不能挂到自己的子节点下（会形成环）。')
 					return
 				}
+				pinLayout()
 				editStore.setParent(from, targetId)
-				flashNote('已把「' + labelOf(from) + '」挂到「' + labelOf(targetId) + '」下。')
+				flashNote('已把「' + labelOf(from) + '」挂到「' + labelOf(targetId) + '」下，并固定当前布局。')
 			}
 
 			// ---- 双击改名 ----
@@ -2226,6 +2333,13 @@ function shrinkImage(file, maxSize, quality) {
 					h('button', { type: 'button', className: 'lm-tool', onClick: collapseAll, title: '收起所有分支' }, '收起'),
 					h('button', { type: 'button', className: 'lm-tool', onClick: relayout, title: '清除手动位置，恢复自动布局' }, '重排'),
 					h('button', { type: 'button', className: 'lm-tool', onClick: resetEdits, title: '清除改名与关系改写' }, '还原'),
+					h('button', {
+						type: 'button',
+						className: 'lm-tool',
+						disabled: selectedEdge === null,
+						onClick: () => detachEdge(selectedEdge),
+						title: '断开选中连线的父子关系（Delete）；子节点变成顶层'
+					}, '断开'),
 					h('span', { className: 'lm-tool-sep' }),
 					h('button', { type: 'button', className: 'lm-tool', onClick: () => { setManualZoom(true); setZoom(value => Math.max(0.18, Math.round((value - 0.1) * 10) / 10)) }, title: '缩小（Ctrl+滚轮）' }, '−'),
 					h('button', { type: 'button', className: 'lm-tool lm-tool-zoom', onClick: fit, title: '适宽并归位（双击空白同效）' }, Math.round(zoom * 100) + '%'),
@@ -2238,7 +2352,7 @@ function shrinkImage(file, maxSize, quality) {
 			const hint = h(
 				'div',
 				{ className: 'lm-graph-hint' },
-				'拖空白 / 中键平移 · Ctrl+滚轮缩放 · 双击空白适宽 · 拖节点改位置 · 双击节点改名 · 拖节点底部圆点改父子关系'
+				'拖空白 / 中键平移 · Ctrl+滚轮缩放 · 双击空白适宽 · 拖节点改位置 · 双击节点改名 · 拖底部圆点改父子关系 · 点连线选中后 Delete 断开'
 			)
 
 
@@ -2512,13 +2626,26 @@ function shrinkImage(file, maxSize, quality) {
 								h('path', { className: 'lm-arrow-head', d: 'M1,1 L11,6 L1,11 Z' })
 							)
 						),
-						edges.map((path, index) => h('path', { key: 's' + index, className: 'lm-graph-halo-soft', d: path })),
-						edges.map((path, index) =>
-							h('path', {
+						edges.map((edge, index) => h('path', { key: 's' + index, className: 'lm-graph-halo-soft', d: edge.path })),
+						edges.map((edge, index) => {
+							const selected = selectedEdge !== null && selectedEdge.from === edge.from && selectedEdge.to === edge.to
+							return h('path', {
 								key: 'e' + index,
-								className: 'lm-graph-edge',
-								d: path,
+								className: 'lm-graph-edge' + (selected ? ' lm-edge-selected' : ''),
+								d: edge.path,
 								markerEnd: `url(#${ARROW_ID})`
+							})
+						}),
+						// 透明加宽的命中层：2px 的线太难点，单独铺 14px 的 stroke 接收点击。
+						edges.map((edge, index) =>
+							h('path', {
+								key: 'h' + index,
+								className: 'lm-edge-hit',
+								d: edge.path,
+								onPointerDown: event => {
+									event.stopPropagation()
+									setSelectedEdge({ from: edge.from, to: edge.to })
+								}
 							})
 						),
 						previewPath !== null ? h('path', { key: 'preview', className: 'lm-graph-link', d: previewPath }) : null
@@ -2538,6 +2665,7 @@ function shrinkImage(file, maxSize, quality) {
 							(id === tree.latestId ? ' lm-gnode-latest' : '') +
 							(pickedId === id ? ' lm-gnode-picked' : '') +
 							(dragging && dragging.id === id ? ' lm-gnode-dragging' : '') +
+							(linkTarget === id ? ' lm-gnode-link-target' : '') +
 							(nodeById.get(id) && nodeById.get(id).custom ? ' lm-gnode-custom' : '') +
 							(item.depth === 0 ? ' lm-gnode-root' : '')
 						return h(
