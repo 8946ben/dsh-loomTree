@@ -247,7 +247,7 @@ if (graphEntry) {
 // 把 buildTree / layoutGraph 暴露出来做断言：在源码尾部临时追加导出。
 const probeSource = source.replace(
   'return { inject, apply }',
-  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __relationChanges: relationChanges, __relationAnswerBudget: relationAnswerBudget, __canAdoptChild: canAdoptChild, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
+  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __relationChanges: relationChanges, __relationAnswerBudget: relationAnswerBudget, __pickFreshIds: pickFreshIds, __canAdoptChild: canAdoptChild, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
 )
 loaded = null
 vm.runInContext(probeSource, sandbox, { filename: 'client-probe.js' })
@@ -448,6 +448,15 @@ if (typeof layoutGraph === 'function') {
       check('5 个节点给到单节点上限 4000', relationAnswerBudget(5) === 4000, String(relationAnswerBudget(5)))
       check('20 个节点按总预算收缩', relationAnswerBudget(20) === 1200, String(relationAnswerBudget(20)))
       check('80 个节点收缩到 300', relationAnswerBudget(80) === 300, String(relationAnswerBudget(80)))
+    }
+
+    // 增量复核：只把没见过的节点交给模型，已有节点保持不动
+    const pickFreshIds = probe.__pickFreshIds
+    check('探针可取到 pickFreshIds', typeof pickFreshIds === 'function')
+    if (typeof pickFreshIds === 'function') {
+      check('只挑出新节点', JSON.stringify(pickFreshIds(['a', 'b'], ['a', 'b', 'c'])) === '["c"]')
+      check('第一次全部算新节点', pickFreshIds([], ['a', 'b']).length === 2)
+      check('没有新节点时不请求模型', pickFreshIds(['a', 'b'], ['a', 'b']).length === 0)
     }
 
     // 连线方向：从 A 的输出拖到 B，是把 B 挂到 A 下；只拒绝自己/祖先造成的环

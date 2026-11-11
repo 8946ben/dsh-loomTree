@@ -54,22 +54,23 @@ const NAMING_SYSTEM = [
 
 const RELATION_SYSTEM = [
   '你在整理一段技术问答会话的知识树。',
-  '输入是一个按时间排序的节点数组，每个节点有：id（节点 id）、seq（序号）、q（提问原文）、a（助手回答节选）、parent（当前规则父节点 id，或 "root"）。',
-  '任务：检查每个节点的直接父节点在主题从属关系上是否合理，并修正明显错误。',
+  '输入是 nodes（按时间排序，每个节点有 id、seq、q、a、parent）以及 fresh（本次新增节点的 id 数组，可能为空）。',
+  '任务：检查节点的直接父节点在主题从属关系上是否合理，并修正明显错误。',
   '规则：',
-  '1. 父节点可以是数组里任意一个节点（不必更早），也可以写 "root"；不能指向自己、不能形成环。',
-  '2. 优先挂到**已有的总览/分类节点**下。只有确实没有共同主题节点时，才写 "root" 建立一个顶层主题；不要把能以总览节点为父的节点提成 root。',
-  '3. 具体方法 / 模型 / 论文应挂到它所属的分类下：EAGLE-1 是「特征级自回归草稿」的具体方法 → 挂在它下面，不要提为 root。',
-  '4. 相近但不相同的类别不要硬挂：父节点是「特征级自回归草稿」，子节点是「半自回归特征级草稿」时，不能挂在它下面；应上移到共同祖先（如「投机解码方法概览」），与近似分类并列。',
-  '5. 结合 a：如果 a 明确说「不是 X」「介于 X 与 Y 之间」「半自回归」等，而父节点是 X 的分类，就不能挂在 X 下，应上移到共同祖先。',
-  '6. 并列、交叉、只共享关键词都不算父子，应挂到共同祖先（扩散草稿与特征级自回归草稿是并列的两类，都挂在「投机解码」下）。',
-  '7. 相邻序号不代表从属关系，不要串成一条链；「它」「这个」「那……呢」这类承接上文的追问，挂到上文对应的具体节点。',
-  '8. 对每个 parent 不为 "root" 的节点都给出判断（即使保持原样也写一遍）；没把握就写原 parent，不要省略。',
-  '9. 示例：',
+  '1. 父节点可以是 nodes 里任意一个节点（不必更早），也可以写 "root"；不能指向自己、不能形成环。',
+  '2. fresh 非空时，只调整并只输出 fresh 中的节点，其他节点的 parent 保持原样；fresh 为空时才检查全部节点。',
+  '3. 优先挂到已有的总览/分类节点下。只有确实没有共同主题节点时，才写 "root" 建立一个顶层主题；不要把能以总览节点为父的节点提成 root。',
+  '4. 具体方法 / 模型 / 论文应挂到它所属的分类下：EAGLE-1 是「特征级自回归草稿」的具体方法 → 挂在它下面，不要提为 root。',
+  '5. 相近但不相同的类别不要硬挂：父节点是「特征级自回归草稿」，子节点是「半自回归特征级草稿」时，不能挂在它下面；应上移到共同祖先（如「投机解码方法概览」），与近似分类并列。',
+  '6. 结合 a：如果 a 明确说「不是 X」「介于 X 与 Y 之间」「半自回归」等，而父节点是 X 的分类，就不能挂在 X 下，应上移到共同祖先。',
+  '7. 并列、交叉、只共享关键词都不算父子，应挂到共同祖先（扩散草稿与特征级自回归草稿是并列的两类，都挂在「投机解码」下）。',
+  '8. 相邻序号不代表从属关系，不要串成一条链；「它」「这个」「那……呢」这类承接上文的追问，挂到上文对应的具体节点。',
+  '9. 对每个需要判断的节点都给出判断（即使保持原样也写一遍）；fresh 非空时只写 fresh 中的节点，fresh 为空时写所有 parent 不为 root 的节点；没把握就写原 parent，不要省略。',
+  '10. 示例：',
   '   - EAGLE-1「工作原理」→ 父节点「特征级自回归草稿」（它在该分类的回答里被列为具体方法）。',
   '   - DSpark 是「半自回归特征级草稿」，现有分类只有「特征级自回归草稿」→ 父节点「投机解码方法概览」，与「特征级自回归草稿」并列；不要挂到「特征级自回归草稿」下。',
   '   - 「扩散草稿」与「特征级自回归草稿」是并列分类，父节点都为「投机解码方法概览」，不要互相挂。',
-  '只输出 JSON 对象：{"parents":{"<节点 id>":"<父节点 id 或 root>"}}，覆盖所有 parent 不为 root 的节点；不要解释、不要代码块。'
+  '只输出 JSON 对象：{"parents":{"<节点 id>":"<父节点 id 或 root>"}}，覆盖 fresh 指定的节点（fresh 为空时覆盖所有 parent 不为 root 的节点）；不要解释、不要代码块。'
 ].join('\n')
 
 /** 稳定的短哈希（djb2），按提问文本缓存命名。 */
@@ -297,7 +298,8 @@ function callRelations(ctx, options, items) {
       q: String(item.text || '').slice(0, 300),
       a: String(item.answer || '').slice(0, 4000),
       parent: item.parent || 'root'
-    }))
+    })),
+    fresh: Array.isArray(options.fresh) ? options.fresh : []
   })
   return callChat(ctx, options, {
     system: RELATION_SYSTEM,
@@ -471,9 +473,11 @@ export function apply(ctx, config) {
               return
             }
             let items
+            let fresh = []
             try {
               const body = JSON.parse(await readBody(req))
               items = body && Array.isArray(body.items) ? body.items : []
+              fresh = body && Array.isArray(body.fresh) ? body.fresh.filter(id => typeof id === 'string').slice(0, MAX_RELATION_ITEMS) : []
             } catch (error) {
               respond(res, 400, { parents: {}, error: 'bad json' })
               return
@@ -495,7 +499,7 @@ export function apply(ctx, config) {
 
             const run = async () => {
               try {
-                const got = await callRelations(ctx, options, valid)
+                const got = await callRelations(ctx, { ...options, fresh }, valid)
                 const ids = new Set(valid.map(item => item.id))
                 const parents = {}
                 for (const id of Object.keys(got)) {

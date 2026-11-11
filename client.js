@@ -490,7 +490,7 @@ window.__ModuleLoader__.load({
 			useEffect(() => {
 				if (!sessionId) return
 				if (relationsStore.sessionId === sessionId) return
-				relationsStore.patch({ sessionId, parents: {}, signature: null, status: 'idle', error: null, ruleOnly: false })
+				relationsStore.patch({ sessionId, parents: {}, signature: null, status: 'idle', error: null, knownIds: [], ruleOnly: false })
 			}, [sessionId])
 			// 顺序很重要：规则树 → LLM 关系修正 → 手动编辑（人工改关系永远最后生效）。
 			// ruleOnly：用户在「仅规则」后，即使有请求在飞，也绝不把 LLM 结果叠上来。
@@ -1239,7 +1239,7 @@ window.__ModuleLoader__.load({
 		// 手动关系最后应用、永远优先。失败不阻塞，可点「复核」强制重来。
 
 		const RELATIONS_ROUTE = '/learnmap/relations'
-		const RELATION_CACHE = 'learnmap.llm.relations.v6'
+		const RELATION_CACHE = 'learnmap.llm.relations.v7'
 		const RELATION_CACHE_MAX = 60
 		const RELATION_MAX_ITEMS = 80
 		// 回答节选的预算：小会话给到近全文，大会话按节点数自动收缩，避免一次请求爆上下文/费用。
@@ -1254,12 +1254,20 @@ window.__ModuleLoader__.load({
 			return Math.max(RELATION_ANSWER_MIN, Math.min(RELATION_ANSWER_MAX, Math.floor(RELATION_ANSWER_BUDGET / n)))
 		}
 
+		/** 本次真正新增的节点：已有节点在增量复核里保持不动（纯函数，便于测试）。 */
+		function pickFreshIds(knownIds, allIds) {
+			const known = knownIds instanceof Set ? knownIds : new Set(Array.isArray(knownIds) ? knownIds : [])
+			return (Array.isArray(allIds) ? allIds : []).filter(id => !known.has(id))
+		}
+
 		const relationsStore = {
 			parents: {},
 			status: 'idle', // idle | busy | failed
 			error: null,
 			signature: null,
 			sessionId: null,
+			// 已经参与过关系复核的节点：新增问题时只把「没见过」的节点交给模型，已有结构默认不动。
+			knownIds: [],
 			ruleOnly: false, // 「仅规则」：本会话不再请 LLM 复核，直到点「重排」
 			version: 0,
 			listeners: new Set(),
@@ -1287,6 +1295,7 @@ window.__ModuleLoader__.load({
 				if (next.error !== undefined) this.error = next.error
 				if (next.signature !== undefined) this.signature = next.signature
 				if (next.sessionId !== undefined) this.sessionId = next.sessionId
+				if (next.knownIds !== undefined) this.knownIds = Array.isArray(next.knownIds) ? next.knownIds : []
 				if (next.ruleOnly !== undefined) this.ruleOnly = next.ruleOnly === true
 				this.emit()
 			}
@@ -1301,6 +1310,7 @@ window.__ModuleLoader__.load({
 				status: relationsStore.status,
 				error: relationsStore.error,
 				signature: relationsStore.signature,
+				knownIds: relationsStore.knownIds,
 				ruleOnly: relationsStore.ruleOnly
 			}
 		}
@@ -1427,13 +1437,13 @@ window.__ModuleLoader__.load({
 			return { roots, count: tree.count, latestId: tree.latestId }
 		}
 
-		/** 请宿主复核整棵树的父子关系。 */
-		async function requestRelations(items) {
+		/** 请宿主复核整棵树的父子关系；fresh 非空时只允许改这些新增节点。 */
+		async function requestRelations(items, fresh) {
 			const res = await fetch(RELATIONS_ROUTE, {
 				method: 'POST',
 				credentials: 'same-origin',
 				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ items: items.slice(0, RELATION_MAX_ITEMS) })
+				body: JSON.stringify({ items: items.slice(0, RELATION_MAX_ITEMS), fresh: Array.isArray(fresh) ? fresh : [] })
 			})
 			if (!res.ok) throw new Error('HTTP ' + res.status)
 			const json = await res.json()
@@ -1454,18 +1464,22 @@ window.__ModuleLoader__.load({
 			if (!tree || tree.count < 2) return
 			const force = options && options.force === true
 			if (relationsStore.ruleOnly && !force) return
+			const entries = flattenTree(tree.roots)
+			const allIds = entries.map(entry => entry.node.id)
+			const freshIds = force ? [] : pickFreshIds(relationsStore.knownIds, allIds)
+			// 增量模式：没有新节点就不打扰模型；已有节点的结构保持不变。
+			if (!force && freshIds.length === 0) return
 			const signature = relationSignature(tree)
 			if (!force && relationsStore.signature === signature) return
 			if (relationInFlight.has(signature)) return relationInFlight.get(signature)
 			if (!force) {
 				const cache = readRelationCache()
 				if (cache[signature] && typeof cache[signature] === 'object') {
-					relationsStore.patch({ parents: cache[signature], signature, status: 'idle', error: null })
+					relationsStore.patch({ parents: cache[signature], signature, knownIds: allIds, status: 'idle', error: null })
 					return
 				}
 			}
 			relationsStore.patch({ status: 'busy', error: null })
-			const entries = flattenTree(tree.roots)
 			const answerBudget = relationAnswerBudget(entries.length)
 			const items = entries.map(entry => ({
 				id: entry.node.id,
@@ -1478,18 +1492,27 @@ window.__ModuleLoader__.load({
 			}))
 			const task = (async () => {
 				try {
-					const result = await requestRelations(items)
+					const result = await requestRelations(items, freshIds)
 					// 「仅规则」期间返回的旧结果直接丢弃，别把 overlay 又叠回去。
 					if (relationsStore.ruleOnly) return
 					// 模型可能把「保持原样」也返回；徽标与缓存只记真正变化的条目。
 					const changes = relationChanges(tree, result.parents)
+					// 顶层节点绝不移动（即使模型给了建议）；增量复核只接受新节点的建议。
+					const fixedRoots = new Set(entries.filter(entry => entry.parentId === null).map(entry => entry.node.id))
+					const applied = Object.fromEntries(
+						Object.entries(changes).filter(
+							([id]) => !fixedRoots.has(id) && (force || freshIds.includes(id))
+						)
+					)
+					const nextParents = force ? applied : { ...relationsStore.parents, ...applied }
 					relationsStore.patch({
-						parents: changes,
+						parents: nextParents,
 						signature,
+						knownIds: allIds,
 						status: result.error ? 'failed' : 'idle',
 						error: result.error
 					})
-					if (!result.error) writeRelationCache(signature, changes)
+					if (!result.error) writeRelationCache(signature, nextParents)
 				} catch (error) {
 					relationsStore.patch({ status: 'failed', error: String((error && error.message) || error), signature })
 				} finally {
