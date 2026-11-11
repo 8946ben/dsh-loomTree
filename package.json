@@ -1,6 +1,6 @@
 {
   "name": "@learnmap/web-plugin",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "private": true,
   "description": "学习分支图：把问答式学习对话自动整理成知识点树，点击节点跳回对应提问（适配 DeepSeek Harness 0.2.x）。",
   "type": "module",

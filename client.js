@@ -1571,6 +1571,8 @@ window.__ModuleLoader__.load({
 			if (!tree || tree.count < 2) return
 			const force = options && options.force === true
 			if (relationsStore.ruleOnly && !force) return
+			const startedSession = relationsStore.sessionId
+			const isStale = () => startedSession !== null && relationsStore.sessionId !== startedSession
 			const entries = flattenTree(tree.roots)
 			const byId = new Map(entries.map(entry => [entry.node.id, entry]))
 			const allIds = entries.map(entry => entry.node.id)
@@ -1615,6 +1617,7 @@ window.__ModuleLoader__.load({
 						relationsStore.patch({ status: 'idle', error: null })
 						return
 					}
+					if (isStale()) return
 					const items = orderedIds.map(id => {
 						const entry = byId.get(id)
 						return {
@@ -1661,6 +1664,8 @@ window.__ModuleLoader__.load({
 					}
 					// 「仅规则」期间返回的旧结果直接丢弃，别把 overlay 又叠回去。
 					if (relationsStore.ruleOnly) return
+					// 切到别的会话后再返回的旧任务，不能把上一个会话的关系写进当前图。
+					if (isStale()) return
 					// 模型可能把「保持原样」也返回；徽标与缓存只记真正变化的条目。
 					const changes = relationChanges(tree, result.parents)
 					// 顶层节点绝不移动（即使模型给了建议）；增量复核只接受新节点的建议。
@@ -1680,7 +1685,7 @@ window.__ModuleLoader__.load({
 					})
 					if (!result.error) writeRelationCache(signature, nextParents)
 				} catch (error) {
-					relationsStore.patch({ status: 'failed', error: String((error && error.message) || error), signature })
+					if (!isStale()) relationsStore.patch({ status: 'failed', error: String((error && error.message) || error), signature })
 				} finally {
 					relationInFlight.delete(signature)
 				}
