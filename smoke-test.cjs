@@ -247,7 +247,7 @@ if (graphEntry) {
 // 把 buildTree / layoutGraph 暴露出来做断言：在源码尾部临时追加导出。
 const probeSource = source.replace(
   'return { inject, apply }',
-  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
+  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __relationChanges: relationChanges, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
 )
 loaded = null
 vm.runInContext(probeSource, sandbox, { filename: 'client-probe.js' })
@@ -429,6 +429,16 @@ if (typeof layoutGraph === 'function') {
       const first = signature(ruleChain)
       const again = signature({ ...ruleChain, roots: JSON.parse(JSON.stringify(ruleChain.roots)) })
       check('节点集合相同则签名稳定', first === again)
+    }
+
+    // 只把真正改变父节点的条目算作「已校正」，模型回写原 parent 时徽标不应亮
+    const relationChanges = probe.__relationChanges
+    check('探针可取到 relationChanges', typeof relationChanges === 'function')
+    if (typeof relationChanges === 'function') {
+      check('原样回写不产生变更', Object.keys(relationChanges(ruleChain, { r2: 'r1', r3: 'r2' })).length === 0, JSON.stringify(relationChanges(ruleChain, { r2: 'r1', r3: 'r2' })))
+      const changed = relationChanges(ruleChain, { r3: 'r1' })
+      check('真正改挂会被记录', changed.r3 === 'r1' && Object.keys(changed).length === 1, JSON.stringify(changed))
+      check('不存在的 id 不计入变更', Object.keys(relationChanges(ruleChain, { nope: 'r1' })).length === 0)
     }
   }
 

@@ -64,10 +64,10 @@ const RELATION_SYSTEM = [
   '5. 结合 a 判断：如果父节点的回答里根本没展开子节点的主题，二者更可能是并列而不是父子。',
   '6. 相邻序号不代表从属关系：同一主题下的并列问题应挂到同一个父节点，不要串成一条链。',
   '7. 「它」「这个」「那……呢」「继续」这类承接上文的追问，挂到上文对应的那个具体节点。',
-  '8. 只在有把握时修改；不确定就保持 parent 不变，也不要在结果里输出这个节点。',
+  '8. 对每个 parent 不为 "root" 的节点都给出你的判断（即使保持原样也要写一遍）；没把握就写原 parent，不要省略。',
   '9. 示例：A「扩散草稿有哪些类型」与 B「特征级自回归草稿都有哪些」不是父子，二者是并列的草稿类型；',
   '   B 应挂到 A 的父节点（如「投机解码」），不要因为都含「草稿」就串成链。',
-  '只输出 JSON 对象：{"parents":{"<节点 id>":"<父节点 id 或 root>"}}，只包含你要修改的节点；不要解释、不要代码块。'
+  '只输出 JSON 对象：{"parents":{"<节点 id>":"<父节点 id 或 root>"}}，覆盖所有 parent 不为 root 的节点；不要解释、不要代码块。'
 ].join('\n')
 
 /** 稳定的短哈希（djb2），按提问文本缓存命名。 */
@@ -301,7 +301,7 @@ function callRelations(ctx, options, items) {
     system: RELATION_SYSTEM,
     payload,
     temperature: 0.2,
-    maxTokens: 1400,
+    maxTokens: 2000,
     parse: parseRelations,
     allowEmpty: true
   })

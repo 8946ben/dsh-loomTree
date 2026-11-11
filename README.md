@@ -1,7 +1,7 @@
 # 学习分支图 · LoomTree
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.x-5b21b6)
-![tests](https://img.shields.io/badge/tests-127%20passing-2ea44f)
+![tests](https://img.shields.io/badge/tests-131%20passing-2ea44f)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 把 DeepSeek Harness 里的问答会话整理成一棵可编辑的知识点树：
@@ -93,10 +93,13 @@ git clone https://github.com/8946ben/dsh-loomTree.git
 | 点击连线 | 选中（线变粗、变主题色） |
 | 选中后 `Delete` / `Backspace` / 顶栏「断开」 | 断开这条父子关系，子节点变顶层 |
 | `Esc` | 取消选中 / 取消正在拖的连线 |
-| `重排` | 清除手动位置，恢复自动布局 |
-| `还原` | 清除本会话的改名与关系改写 |
+| `复核` | 重新请 LLM 复核父子关系（绕过缓存；失败时标题栏也会出现「复核失败 · 重试」） |
+| `重排` | **只**清除手动位置，恢复自动布局，不改父子关系 |
+| `还原` | 清除手动编辑（改名/关系/位置），并重新请 LLM 复核一次 |
 
 手动改关系前会**固定当前布局**（节点不会因为重排而跳动）；点「重排」恢复自动排列。
+标题栏的几个状态：`关系复核中…`、`关系已校正 · 撤销`、`关系已核对`（模型看过，认为无需调整）、
+`复核失败 · 重试`。
 关系复核（`relate: true`）在检测到手动关系后会整体让位，不会和人工布局混在一起。
 
 折叠按钮在悬停节点时出现（分支已收起时常显）。
@@ -122,7 +125,7 @@ DSH 的会话窗口是分页加载的，所以打开图时会自动向前补齐�
 | 改名 / 关系 / 手动位置 | `localStorage['learnmap.edits.v1']`（按消息 id） |
 | 画板外观与底图 | `localStorage['learnmap.board.v1']`（图片为 dataURL） |
 | 节点标题缓存 | `localStorage['learnmap.llm.labels.v2']` + `~/.dsh/storages/learnmap/labels-v2.json` |
-| LLM 关系复核缓存 | `localStorage['learnmap.llm.relations.v3']`（按节点集合签名） |
+| LLM 关系复核缓存 | `localStorage['learnmap.llm.relations.v4']`（按节点集合签名） |
 
 模型密钥只存在 profile 补丁层；宿主路由只接受回环请求，`/learnmap/llm.json` 不会回传密钥。
 
@@ -161,12 +164,12 @@ DSH 的会话窗口是分页加载的，所以打开图时会自动向前补齐�
 | `client.js` | 浏览器半区：两个挂载点、建树、关系修正、布局、画板与样式 |
 | `cordis.patch.yml` | bundle 插入的插件行 |
 | `locale/`、`icon.svg` | 插件管理器的标题、描述与图标 |
-| `smoke-test.cjs` | 离线冒烟测试（127 条） |
+| `smoke-test.cjs` | 离线冒烟测试（131 条） |
 | `llm-smoke.cjs` | 命名链路自检 |
 
 ```bash
 node --check client.js
-node smoke-test.cjs        # 期望「全部通过」127 条
+node smoke-test.cjs        # 期望「全部通过」131 条
 ```
 
 改 `client.js` 后刷新页面（`Ctrl+R`）即可；改 `index.js` 需要重载插件行或重启应用。

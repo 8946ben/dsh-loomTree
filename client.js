@@ -535,6 +535,14 @@ window.__ModuleLoader__.load({
 				return () => clearTimeout(timer)
 			}, [baseTree, llmConfig, edits.version])
 
+			/** 手动触发一次复核：清掉签名/缓存绕过，用于「复核」和「重试」按钮。 */
+			const recheckRelations = useCallback(() => {
+				if (!llmConfig || llmConfig.relate === false) return
+				if (!baseTree || baseTree.count < 2) return
+				relationsStore.patch({ parents: {}, signature: null, status: 'busy', error: null })
+				return driveRelations(baseTree, llmConfig, { force: true })
+			}, [baseTree, llmConfig])
+
 			const displayNames = useMemo(() => {
 				const cache = readLabelCache()
 				const map = new Map()
@@ -574,6 +582,10 @@ window.__ModuleLoader__.load({
 				llmConfig,
 				naming,
 				relations: relations.parents,
+				relationStatus: relations.status,
+				relationChecked: relations.signature !== null,
+				relationError: relations.error,
+				recheckRelations,
 				editVersion: edits.version,
 				displayName: node => displayNames.get(node.id) || node.label,
 				busy,
@@ -1201,12 +1213,12 @@ window.__ModuleLoader__.load({
 		// ==============================================================
 		//
 		// 规则建树便宜、稳定，但会犯错：术语没命中的并列问题容易被串成一条链，
-		// 或者被某个泛词吸到不相关的节点下。这里把整棵树的提问交给一次模型复核，
-		// 只接受「指向更早节点」的修改；手动改的关系仍然最后应用、永远优先。
-		// 结果按「节点 id + seq」签名缓存在本地，节点集合不变就不会重复付费。
+		// 或者被某个泛词吸到不相关的节点下。这里把整棵树的提问 + 回答节选交给一次模型复核，
+		// 顶层主题（root）保持不动，只调整非根节点；结果按「节点集合签名」缓存，
+		// 手动关系最后应用、永远优先。失败不阻塞，可点「复核」强制重来。
 
 		const RELATIONS_ROUTE = '/learnmap/relations'
-		const RELATION_CACHE = 'learnmap.llm.relations.v3'
+		const RELATION_CACHE = 'learnmap.llm.relations.v4'
 		const RELATION_CACHE_MAX = 60
 		const RELATION_MAX_ITEMS = 80
 		const relationInFlight = new Map()
@@ -1254,7 +1266,8 @@ window.__ModuleLoader__.load({
 				version,
 				parents: relationsStore.parents,
 				status: relationsStore.status,
-				error: relationsStore.error
+				error: relationsStore.error,
+				signature: relationsStore.signature
 			}
 		}
 
@@ -1262,6 +1275,22 @@ window.__ModuleLoader__.load({
 		function relationSignature(tree) {
 			const entries = flattenTree(tree.roots)
 			return hashText(entries.map(entry => entry.node.id + ':' + (entry.node.seq || 0) + ':' + String(entry.node.assistantText || '').length).join('|'))
+		}
+
+		/** 只保留真正改变父节点的条目（root 与 null 等价），用于徽标与技术缓存。 */
+		function relationChanges(tree, parents) {
+			if (!tree || !parents || typeof parents !== 'object') return {}
+			const current = new Map()
+			for (const entry of flattenTree(tree.roots)) current.set(entry.node.id, entry.parentId || 'root')
+			const out = {}
+			for (const id of Object.keys(parents)) {
+				if (!current.has(id)) continue
+				const value = parents[id]
+				if (typeof value !== 'string') continue
+				if ((current.get(id) || 'root') === value) continue
+				out[id] = value
+			}
+			return out
 		}
 
 		function readRelationCache() {
@@ -1384,17 +1413,21 @@ window.__ModuleLoader__.load({
 		 * 驱动一次关系复核：节点集合不变就直接用缓存 / 现有结果。
 		 * @param tree - 规则树（不要传已修正的树，否则「保持 parent」会读到修正值）。
 		 * @param config - loadLlmConfig() 的结果；`relate: false` 时不动。
+		 * @param options - `{ force: true }` 时绕过签名与缓存，供「复核 / 重试」按钮使用。
 		 */
-		async function driveRelations(tree, config) {
+		async function driveRelations(tree, config, options) {
 			if (!config || config.relate === false) return
 			if (!tree || tree.count < 2) return
+			const force = options && options.force === true
 			const signature = relationSignature(tree)
-			if (relationsStore.signature === signature) return
+			if (!force && relationsStore.signature === signature) return
 			if (relationInFlight.has(signature)) return relationInFlight.get(signature)
-			const cache = readRelationCache()
-			if (cache[signature] && typeof cache[signature] === 'object') {
-				relationsStore.patch({ parents: cache[signature], signature, status: 'idle', error: null })
-				return
+			if (!force) {
+				const cache = readRelationCache()
+				if (cache[signature] && typeof cache[signature] === 'object') {
+					relationsStore.patch({ parents: cache[signature], signature, status: 'idle', error: null })
+					return
+				}
 			}
 			relationsStore.patch({ status: 'busy', error: null })
 			const items = flattenTree(tree.roots).map(entry => ({
@@ -1408,13 +1441,15 @@ window.__ModuleLoader__.load({
 			const task = (async () => {
 				try {
 					const result = await requestRelations(items)
+					// 模型可能把「保持原样」也返回；徽标与缓存只记真正变化的条目。
+					const changes = relationChanges(tree, result.parents)
 					relationsStore.patch({
-						parents: result.parents,
+						parents: changes,
 						signature,
 						status: result.error ? 'failed' : 'idle',
 						error: result.error
 					})
-					if (!result.error) writeRelationCache(signature, result.parents)
+					if (!result.error) writeRelationCache(signature, changes)
 				} catch (error) {
 					relationsStore.patch({ status: 'failed', error: String((error && error.message) || error), signature })
 				} finally {
@@ -1782,7 +1817,7 @@ function shrinkImage(file, maxSize, quality) {
 		function GraphSurface(props) {
 			const sessionId = props.sessionId
 			props.useSession(snapshot => snapshot)
-			const { binding, windowState, tree, llmConfig, naming, relations, displayName, onJump, editVersion } = useLearnmapSession(sessionId)
+			const { binding, windowState, tree, llmConfig, naming, relations, relationStatus, relationChecked, relationError, recheckRelations, displayName, onJump, editVersion } = useLearnmapSession(sessionId)
 			const [collapsed, setCollapsed] = useState({})
 			const [zoom, setZoom] = useState(1)
 			const [pickedId, setPickedId] = useState(null)
@@ -1917,11 +1952,11 @@ function shrinkImage(file, maxSize, quality) {
 				setTimeout(() => setNote(null), 4000)
 			}, [])
 
-			/** 撤销本轮 LLM 关系修正（恢复规则关系）；签名保留，避免立刻重新请求。 */
+			/** 撤销本轮 LLM 关系修正（恢复规则关系）；签名也清掉，徽标归零，不立刻重算。 */
 			const dismissRelations = useCallback(() => {
 				if (Object.keys(relationsStore.parents).length === 0) return
-				relationsStore.patch({ parents: {}, status: 'idle', error: null })
-				flashNote('已撤销 LLM 关系修正，恢复规则关系；需要时可再手动调整。')
+				relationsStore.patch({ parents: {}, signature: null, status: 'idle', error: null })
+				flashNote('已撤销 LLM 关系修正，恢复规则关系；需要时可点「复核」重新请求。')
 			}, [flashNote])
 
 			/** 能否把 from 挂到 targetId 下：不能挂自己、不能挂到自己的子孙（成环）。 */
@@ -2137,14 +2172,20 @@ function shrinkImage(file, maxSize, quality) {
 
 			const relayout = useCallback(() => {
 				editStore.clearPositions(allIds())
-				flashNote('已按自动布局重排。')
+				flashNote('已恢复自动布局（父子关系不变；要重新请模型复核请点「复核」）。')
 			}, [allIds, flashNote])
 
 			const resetEdits = useCallback(() => {
 				editStore.reset(allIds())
 				setEditing(null)
-				flashNote('已清除本会话的改名与关系改写。')
-			}, [allIds, flashNote])
+				relationsStore.patch({ parents: {}, signature: null, status: 'idle', error: null })
+				if (llmConfig && llmConfig.relate !== false) {
+					flashNote('已清除手动编辑，正在重新复核关系…')
+					recheckRelations()
+				} else {
+					flashNote('已清除本会话的改名与关系改写。')
+				}
+			}, [allIds, flashNote, llmConfig, recheckRelations])
 
 			/** 屏幕坐标 → 画板坐标（画板是 scale 变换过的，所以要除以 zoom）。 */
 			const toCanvas = useCallback(
@@ -2338,25 +2379,49 @@ function shrinkImage(file, maxSize, quality) {
 					? h('span', { className: 'lm-graph-badge lm-warn', title: naming.error || '' }, '命名失败')
 					: null,
 				llmConfig ? null : h('span', { className: 'lm-graph-badge' }, '规则命名'),
-				llmConfig && llmConfig.relate !== false && relations && Object.keys(relations).length > 0
-					? h(
-							'button',
-							{
-								type: 'button',
-								className: 'lm-graph-badge lm-badge-action',
-								onClick: dismissRelations,
-								title: '点击撤销 LLM 关系修正，恢复规则关系'
-							},
-							'关系已校正 · 撤销'
-					  )
+				llmConfig && llmConfig.relate !== false
+					? relationStatus === 'busy'
+						? h('span', { className: 'lm-graph-badge' }, '关系复核中…')
+						: relationStatus === 'failed'
+							? h(
+									'button',
+									{
+										type: 'button',
+										className: 'lm-graph-badge lm-badge-action lm-warn',
+										onClick: recheckRelations,
+										title: relationError || '关系复核失败，点击重试'
+									},
+									'复核失败 · 重试'
+							  )
+							: relations && Object.keys(relations).length > 0
+								? h(
+										'button',
+										{
+											type: 'button',
+											className: 'lm-graph-badge lm-badge-action',
+											onClick: dismissRelations,
+											title: '点击撤销 LLM 关系修正，恢复规则关系'
+										},
+										'关系已校正 · 撤销'
+								  )
+								: relationChecked
+									? h('span', { className: 'lm-graph-badge', title: 'LLM 已复核，认为规则关系无需调整' }, '关系已核对')
+									: null
 					: null,
 				h(
 					'div',
 					{ className: 'lm-graph-tools' },
 					h('button', { type: 'button', className: 'lm-tool', onClick: expandAll, title: '展开所有分支' }, '展开'),
 					h('button', { type: 'button', className: 'lm-tool', onClick: collapseAll, title: '收起所有分支' }, '收起'),
-					h('button', { type: 'button', className: 'lm-tool', onClick: relayout, title: '清除手动位置，恢复自动布局' }, '重排'),
-					h('button', { type: 'button', className: 'lm-tool', onClick: resetEdits, title: '清除改名与关系改写' }, '还原'),
+					h('button', { type: 'button', className: 'lm-tool', onClick: relayout, title: '清除手动位置，恢复自动布局（不改父子关系）' }, '重排'),
+					h('button', { type: 'button', className: 'lm-tool', onClick: resetEdits, title: '清除手动编辑，并重新请 LLM 复核关系' }, '还原'),
+					h('button', {
+						type: 'button',
+						className: 'lm-tool',
+						disabled: !llmConfig || llmConfig.relate === false || relationStatus === 'busy',
+						onClick: recheckRelations,
+						title: '重新请 LLM 复核父子关系（绕过缓存）'
+					}, '复核'),
 					h('button', {
 						type: 'button',
 						className: 'lm-tool',
