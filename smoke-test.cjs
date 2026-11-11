@@ -247,7 +247,7 @@ if (graphEntry) {
 // 把 buildTree / layoutGraph 暴露出来做断言：在源码尾部临时追加导出。
 const probeSource = source.replace(
   'return { inject, apply }',
-  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __relationChanges: relationChanges, __pickFreshIds: pickFreshIds, __summaryKey: summaryKey, __fallbackSummary: fallbackSummary, __canAdoptChild: canAdoptChild, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
+  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __relationChanges: relationChanges, __pickFreshIds: pickFreshIds, __summaryKey: summaryKey, __fallbackSummary: fallbackSummary, __snapshotEdits: snapshotEdits, __mergeSnapshotTree: mergeSnapshotTree, __canAdoptChild: canAdoptChild, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
 )
 loaded = null
 vm.runInContext(probeSource, sandbox, { filename: 'client-probe.js' })
@@ -459,6 +459,30 @@ if (typeof layoutGraph === 'function') {
       check('摘要键区分节点', summaryKey('a', '正文') !== summaryKey('b', '正文'))
       check('摘要键区分正文', summaryKey('a', '正文') !== summaryKey('a', '正文2'))
       check('兜底摘要截断到 1200', fallbackSummary('x'.repeat(3000), 'q').length === 1200)
+    }
+
+    // 快照基线：名字 + 父子关系可以作为一层应用到树上
+    const snapshotEdits = probe.__snapshotEdits
+    check('探针可取到 snapshotEdits', typeof snapshotEdits === 'function')
+    if (typeof snapshotEdits === 'function') {
+      const snap = snapshotEdits({ nodes: [{ id: 'r1', name: '根', parent: null }, { id: 'r2', name: '子', parent: 'r1' }] })
+      const snapTree = probe.__applyEdits(ruleChain, snap)
+      check('快照能恢复父子关系', (snapTree.roots[0] && snapTree.roots[0].id) === 'r1', JSON.stringify(snap))
+      check('快照能恢复名字', snap && snap.names && snap.names.r1 === '根', JSON.stringify(snap))
+
+      // 会话事件里没有的节点（被压缩/不在窗口）也要能从快照补回来
+      const mergeSnapshotTree = probe.__mergeSnapshotTree
+      const merged = mergeSnapshotTree(ruleChain, {
+        nodes: [{ id: 'r4', seq: 4, name: '补回节点', text: '补回问题', parent: 'r3', x: 400, y: 500 }]
+      })
+      const mergedTree = probe.__applyEdits(merged, snapshotEdits({
+        nodes: [{ id: 'r1', parent: null }, { id: 'r2', parent: 'r1' }, { id: 'r3', parent: 'r2' }, { id: 'r4', parent: 'r3' }]
+      }))
+      const mergedIds = []
+      const walkMerged = list => list.forEach(node => { mergedIds.push(node.id); walkMerged(node.children || []) })
+      walkMerged(mergedTree.roots)
+      check('快照能补回事件窗口里没有的节点', mergedIds.includes('r4'), JSON.stringify(mergedIds))
+      check('补回节点能挂到快照父节点下', mergedTree.roots[0] && mergedTree.roots[0].id === 'r1' && mergedTree.count === 4, JSON.stringify(mergedIds))
     }
 
     // 连线方向：从 A 的输出拖到 B，是把 B 挂到 A 下；只拒绝自己/祖先造成的环

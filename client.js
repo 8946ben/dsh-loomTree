@@ -486,16 +486,38 @@ window.__ModuleLoader__.load({
 			const baseTree = useMemo(() => buildTree(windowState.entries), [windowState])
 			const edits = useEdits()
 			const relations = useRelations()
+			const graphSnapshot = useGraphSnapshot(sessionId)
 			// 切换会话时丢掉上一个会话的修正结果，避免徽标和旧映射串台（节点 id 全局唯一，不会误挂）。
 			useEffect(() => {
 				if (!sessionId) return
 				if (relationsStore.sessionId === sessionId) return
 				relationsStore.patch({ sessionId, parents: {}, signature: null, status: 'idle', error: null, knownIds: [], ruleOnly: false })
 			}, [sessionId])
-			// 顺序很重要：规则树 → LLM 关系修正 → 手动编辑（人工改关系永远最后生效）。
-			// ruleOnly：用户在「仅规则」后，即使有请求在飞，也绝不把 LLM 结果叠上来。
-			const llmTree = useMemo(() => applyLlmParents(baseTree, relations.ruleOnly ? {} : relations.parents), [baseTree, relations.parents, relations.ruleOnly])
-			const tree = useMemo(() => applyEdits(llmTree, editStore), [llmTree, edits.version])
+			// 快照恢复：坐标钉住，旧节点记入 knownIds（新节点仍可增量复核）。
+			useEffect(() => {
+				const snapshot = graphSnapshot.snapshot
+				if (!snapshot || snapshot.sessionId !== sessionId || !Array.isArray(snapshot.nodes)) return
+				const positions = {}
+				for (const node of snapshot.nodes) {
+					if (!node || typeof node.id !== 'string' || !node.id) continue
+					positions[node.id] = { x: Number(node.x) || 0, y: Number(node.y) || 0 }
+				}
+				if (Object.keys(positions).length > 0) editStore.setPositions(positions)
+				relationsStore.patch({
+					knownIds: snapshot.nodes.map(node => node.id).filter(id => typeof id === 'string'),
+					parents: {},
+					signature: null,
+					status: 'idle',
+					error: null
+				})
+			}, [graphSnapshot.snapshot, sessionId])
+			// 顺序：规则树 → 图快照补齐缺失节点 → LLM 关系 → 快照覆盖旧节点 → 手动编辑。
+			// 快照里的旧节点被当作基线；新节点仍可走增量 LLM（knownIds 只含快照节点）。
+			const mergedBase = useMemo(() => mergeSnapshotTree(baseTree, graphSnapshot.snapshot), [baseTree, graphSnapshot.snapshot])
+			const llmTree = useMemo(() => applyLlmParents(mergedBase, relations.ruleOnly ? {} : relations.parents), [mergedBase, relations.parents, relations.ruleOnly])
+			const snapEdits = useMemo(() => snapshotEdits(graphSnapshot.snapshot), [graphSnapshot.snapshot])
+			const snapshotTree = useMemo(() => (snapEdits ? applyEdits(llmTree, snapEdits) : llmTree), [llmTree, snapEdits])
+			const tree = useMemo(() => applyEdits(snapshotTree, editStore), [snapshotTree, edits.version])
 			const naming = useNaming()
 			const [llmConfig, setLlmConfig] = useState(undefined)
 
@@ -513,7 +535,34 @@ window.__ModuleLoader__.load({
 				}
 			}, [])
 
-			// 树变化 → 防抖后补名字；已发出的请求不中断（模块级去重防止重复付费）。
+			// 快照是否已经覆盖当前整棵规则树（没有新消息）；覆盖时不需要等 LLM。
+			const snapshotCoversTree = useMemo(() => {
+				const snapshot = graphSnapshot.snapshot
+				if (!snapshot || !Array.isArray(snapshot.nodes)) return false
+				const ids = new Set(snapshot.nodes.map(node => node && node.id).filter(Boolean))
+				return flattenTree(baseTree.roots).every(entry => ids.has(entry.node.id))
+			}, [graphSnapshot.snapshot, baseTree])
+
+			// 什么时候可以写快照：不能把“规则树/待复核的中间态”写成最终版本。
+			const relationSettled = useMemo(() => {
+				if (snapshotCoversTree) return true
+				if (llmConfig === undefined) return false
+				if (llmConfig === null) return true
+				if (llmConfig.relate === false) return true
+				if (relations.ruleOnly) return true
+				if (Object.keys(editStore.parents).length > 0) return true
+				if (baseTree.count < 2) return true
+				return relations.status === 'idle' && relations.signature !== null && relations.signature === relationSignature(baseTree)
+			}, [
+				snapshotCoversTree,
+				llmConfig,
+				relations.ruleOnly,
+				relations.status,
+				relations.signature,
+				edits.version,
+				baseTree
+			])
+
 			useEffect(() => {
 				if (!llmConfig) return undefined
 				const timer = setTimeout(() => {
@@ -528,6 +577,7 @@ window.__ModuleLoader__.load({
 			// 手动改关系时由 onLinkPointerUp / detachEdge 显式让位给人工。
 			useEffect(() => {
 				if (!llmConfig || llmConfig.relate === false) return undefined
+				if (graphSnapshot.status !== 'ready') return undefined
 				if (relationsStore.ruleOnly) return undefined
 				if (Object.keys(editStore.parents).length > 0) {
 					if (Object.keys(relationsStore.parents).length > 0) relationsStore.patch({ parents: {}, signature: null, status: 'idle', error: null })
@@ -537,7 +587,7 @@ window.__ModuleLoader__.load({
 					driveRelations(baseTree, llmConfig)
 				}, 900)
 				return () => clearTimeout(timer)
-			}, [baseTree, llmConfig, relations.ruleOnly])
+			}, [baseTree, llmConfig, relations.ruleOnly, graphSnapshot.status])
 
 			/** 「重排」用：清空 LLM 覆盖层并强制重新复核（绕过签名/缓存）。 */
 			const rerunRelations = useCallback(() => {
@@ -597,6 +647,10 @@ window.__ModuleLoader__.load({
 				relationRuleOnly: relations.ruleOnly,
 				rerunRelations,
 				showRuleOnly,
+				snapshot: graphSnapshot.snapshot,
+				snapshotStatus: graphSnapshot.status,
+				clearSnapshot: graphSnapshot.clear,
+				relationSettled,
 				editVersion: edits.version,
 				displayName: node => displayNames.get(node.id) || node.label,
 				busy,
@@ -1240,6 +1294,8 @@ window.__ModuleLoader__.load({
 
 		const RELATIONS_ROUTE = '/learnmap/relations'
 		const SUMMARY_ROUTE = '/learnmap/summary'
+		const GRAPH_ROUTE = '/learnmap/graph'
+		const SNAPSHOT_SCHEMA = 1
 		const RELATION_CACHE = 'learnmap.llm.relations.v8'
 		const RELATION_CACHE_MAX = 60
 		const RELATION_MAX_ITEMS = 80
@@ -1557,6 +1613,170 @@ window.__ModuleLoader__.load({
 				need: json && Array.isArray(json.need) ? json.need.filter(id => typeof id === 'string') : [],
 				raw: json && typeof json.raw === 'string' ? json.raw : '',
 				error: json && typeof json.error === 'string' ? json.error : null
+			}
+		}
+
+		/** 把快照变成一次「人工改写」：名字 + 父子关系，坐标由 editStore 另外恢复。 */
+		function snapshotEdits(snapshot) {
+			if (!snapshot || !Array.isArray(snapshot.nodes)) return null
+			const names = {}
+			const parents = {}
+			for (const node of snapshot.nodes) {
+				if (!node || typeof node.id !== 'string' || !node.id) continue
+				if (typeof node.name === 'string' && node.name) names[node.id] = node.name
+				parents[node.id] = typeof node.parent === 'string' && node.parent ? node.parent : 'root'
+			}
+			if (Object.keys(names).length === 0 && Object.keys(parents).length === 0) return null
+			return { names, parents }
+		}
+
+		/**
+		 * 快照自包含：会话事件被压缩/已不在窗口时，快照里多出来的节点也要能显示。
+		 * 缺失节点先作为根加入，随后由 snapshotEdits 的 parent 重新挂接。
+		 */
+		function mergeSnapshotTree(tree, snapshot) {
+			if (!snapshot || !Array.isArray(snapshot.nodes) || snapshot.nodes.length === 0) return tree
+			const existing = new Set(flattenTree(tree.roots).map(entry => entry.node.id))
+			const missing = snapshot.nodes.filter(node => node && typeof node.id === 'string' && node.id && !existing.has(node.id))
+			if (missing.length === 0) return tree
+			const clone = node => ({ ...node, children: (node.children || []).map(clone) })
+			const roots = tree.roots.map(clone)
+			let latest = tree.latestId
+			let latestSeq = -Infinity
+			for (const entry of flattenTree(tree.roots)) {
+				const seq = entry.node.seq || 0
+				if (seq > latestSeq) {
+					latestSeq = seq
+					latest = entry.node.id
+				}
+			}
+			for (const node of missing) {
+				const id = node.id
+				const name = typeof node.name === 'string' && node.name ? node.name : String(node.text || id)
+				const seq = Number.isFinite(node.seq) ? node.seq : 0
+				roots.push({
+					id,
+					seq,
+					time: 0,
+					text: typeof node.text === 'string' && node.text ? node.text : name,
+					label: name,
+					custom: name,
+					children: []
+				})
+				if (seq > latestSeq) {
+					latestSeq = seq
+					latest = id
+				}
+			}
+			return { roots, count: tree.count + missing.length, latestId: latest }
+		}
+
+		async function loadGraphSnapshot(sessionId) {
+			if (!sessionId) return null
+			const res = await fetch(GRAPH_ROUTE + '?session=' + encodeURIComponent(sessionId), {
+				method: 'GET',
+				credentials: 'same-origin'
+			})
+			if (!res.ok) return null
+			const json = await res.json()
+			const snapshot = json && json.snapshot
+			if (!snapshot || snapshot.schema !== SNAPSHOT_SCHEMA || snapshot.sessionId !== sessionId) return null
+			return snapshot
+		}
+
+		async function saveGraphSnapshot(sessionId, snapshot, keepalive) {
+			if (!sessionId || !snapshot) return
+			const res = await fetch(GRAPH_ROUTE, {
+				method: 'PUT',
+				credentials: 'same-origin',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ sessionId, snapshot }),
+				keepalive: keepalive === true
+			})
+			if (!res.ok) throw new Error('HTTP ' + res.status)
+		}
+
+		async function deleteGraphSnapshot(sessionId) {
+			if (!sessionId) return
+			try {
+				await fetch(GRAPH_ROUTE + '?session=' + encodeURIComponent(sessionId), {
+					method: 'DELETE',
+					credentials: 'same-origin',
+					keepalive: true
+				})
+			} catch (error) {
+				// 删除失败就留旧文件；下一次保存会覆盖。
+			}
+		}
+
+		/** 全插件共享一份快照状态：侧栏图与细条图必须同时恢复/同时清空。 */
+		const graphSnapshotStore = {
+			sessionId: null,
+			status: 'idle',
+			snapshot: null,
+			generation: 0,
+			listeners: new Set(),
+			subscribe(listener) {
+				this.listeners.add(listener)
+				return () => this.listeners.delete(listener)
+			},
+			emit() {
+				for (const listener of Array.from(this.listeners)) {
+					try {
+						listener()
+					} catch (error) {
+						console.error('[learnmap] snapshot listener:', error)
+					}
+				}
+			},
+			patch(next) {
+				if (next.sessionId !== undefined) this.sessionId = next.sessionId
+				if (next.status !== undefined) this.status = next.status
+				if (next.snapshot !== undefined) this.snapshot = next.snapshot
+				if (next.generation !== undefined) this.generation = next.generation
+				this.emit()
+			}
+		}
+
+		/** 加载当前会话的图快照；切换会话时清空，避免上一个会话的图串台。 */
+		function useGraphSnapshot(sessionId) {
+			const [, setTick] = useState(0)
+			useEffect(() => graphSnapshotStore.subscribe(() => setTick(value => value + 1)), [])
+			useEffect(() => {
+				if (!sessionId) {
+					graphSnapshotStore.patch({ sessionId: null, status: 'idle', snapshot: null })
+					return undefined
+				}
+				if (graphSnapshotStore.sessionId === sessionId && graphSnapshotStore.status === 'ready') return undefined
+				const generation = graphSnapshotStore.generation + 1
+				graphSnapshotStore.patch({ sessionId, status: 'loading', snapshot: null, generation })
+				let alive = true
+				loadGraphSnapshot(sessionId)
+					.then(snapshot => {
+						if (!alive || graphSnapshotStore.sessionId !== sessionId || graphSnapshotStore.generation !== generation) return
+						graphSnapshotStore.patch({ status: 'ready', snapshot })
+					})
+					.catch(() => {
+						if (!alive || graphSnapshotStore.sessionId !== sessionId || graphSnapshotStore.generation !== generation) return
+						graphSnapshotStore.patch({ status: 'ready', snapshot: null })
+					})
+				return () => {
+					alive = false
+				}
+			}, [sessionId])
+			const clear = useCallback(() => {
+				graphSnapshotStore.patch({
+					status: 'ready',
+					snapshot: null,
+					generation: graphSnapshotStore.generation + 1
+				})
+				deleteGraphSnapshot(sessionId)
+			}, [sessionId])
+			return {
+				status: graphSnapshotStore.status,
+				sessionId: graphSnapshotStore.sessionId,
+				snapshot: graphSnapshotStore.snapshot,
+				clear
 			}
 		}
 
@@ -2083,7 +2303,7 @@ function shrinkImage(file, maxSize, quality) {
 		function GraphSurface(props) {
 			const sessionId = props.sessionId
 			props.useSession(snapshot => snapshot)
-			const { binding, windowState, tree, llmConfig, naming, relations, relationStatus, relationChecked, relationError, relationRuleOnly, rerunRelations, showRuleOnly, displayName, onJump, editVersion } = useLearnmapSession(sessionId)
+			const { binding, windowState, tree, llmConfig, naming, relations, relationStatus, relationChecked, relationError, relationRuleOnly, rerunRelations, showRuleOnly, displayName, onJump, editVersion, snapshot, snapshotStatus, clearSnapshot, relationSettled } = useLearnmapSession(sessionId)
 			const [collapsed, setCollapsed] = useState({})
 			const [zoom, setZoom] = useState(1)
 			const [pickedId, setPickedId] = useState(null)
@@ -2113,6 +2333,25 @@ function shrinkImage(file, maxSize, quality) {
 			zoomRef.current = zoom
 			const panStateRef = React.useRef(pan)
 			panStateRef.current = pan
+
+			// 恢复上周那版：折叠状态与视图（缩放/平移）；没有快照就保持自动适宽。
+			useEffect(() => {
+				if (!snapshot || snapshot.sessionId !== sessionId) return
+				const folded = {}
+				for (const node of snapshot.nodes) {
+					if (node && node.collapsed) folded[node.id] = true
+				}
+				setCollapsed(folded)
+				const view = snapshot.view
+				if (view && Number.isFinite(view.zoom)) {
+					setZoom(Math.max(0.18, Math.min(1.8, view.zoom)))
+					setPan({
+						x: view.pan && Number.isFinite(view.pan.x) ? view.pan.x : 16,
+						y: view.pan && Number.isFinite(view.pan.y) ? view.pan.y : 16
+					})
+					setManualZoom(true)
+				}
+			}, [snapshot, sessionId])
 
 			// ---- 画板底纹设置（点阵 / 纯色 / 自定义图片）----
 			const [board, setBoard] = useState(readBoard)
@@ -2177,6 +2416,65 @@ function shrinkImage(file, maxSize, quality) {
 				return { map, width, height }
 				// editVersion：拖动提交后重新取固定坐标
 			}, [layout, editVersion])
+
+			// 每会话快照：把「当前最终图」写回宿主文件；切换会话/关页面时立即 flush。
+			const snapshotPayload = useMemo(() => {
+				if (!sessionId || snapshotStatus !== 'ready' || tree.count === 0) return null
+				const nodes = []
+				const walk = (list, parentId) => {
+					for (const node of list) {
+						const point = placed.map.get(node.id)
+						if (!point) continue
+						nodes.push({
+							id: node.id,
+							seq: node.seq || 0,
+							name: displayName(node),
+							text: node.text || '',
+							parent: parentId || null,
+							x: point.x,
+							y: point.y,
+							collapsed: collapsed[node.id] === true
+						})
+						walk(node.children || [], node.id)
+					}
+				}
+				walk(tree.roots, null)
+				if (nodes.length === 0) return null
+				return {
+					schema: SNAPSHOT_SCHEMA,
+					sessionId,
+					nodes,
+					view: { zoom, pan: { x: pan.x, y: pan.y } }
+				}
+				// naming.version：名字到达后要写进快照；displayName 是每次渲染的新函数，不能进依赖。
+			}, [sessionId, snapshotStatus, tree, placed, collapsed, zoom, pan, naming.version])
+			const lastSnapshotRef = React.useRef({ sessionId: null, payload: null })
+			useEffect(() => {
+				if (!snapshotPayload || !relationSettled) return undefined
+				lastSnapshotRef.current = { sessionId, payload: snapshotPayload }
+				const timer = setTimeout(() => {
+					saveGraphSnapshot(sessionId, snapshotPayload).catch(() => {})
+				}, 600)
+				return () => clearTimeout(timer)
+			}, [snapshotPayload, sessionId, relationSettled])
+			useEffect(() => {
+				const flush = () => {
+					if (!relationSettled) return
+					const last = lastSnapshotRef.current
+					if (!last.payload || last.sessionId !== sessionId) return
+					saveGraphSnapshot(last.sessionId, last.payload, true).catch(() => {})
+				}
+				const onVisibility = () => {
+					if (document.visibilityState === 'hidden') flush()
+				}
+				window.addEventListener('pagehide', flush)
+				document.addEventListener('visibilitychange', onVisibility)
+				return () => {
+					window.removeEventListener('pagehide', flush)
+					document.removeEventListener('visibilitychange', onVisibility)
+					flush()
+				}
+			}, [sessionId, relationSettled])
 
 			/** 手动改关系前先把当前坐标钉住：连线/断开时不再整棵树重排，像画板一样稳定。 */
 			const pinLayout = useCallback(() => {
@@ -2431,31 +2729,33 @@ function shrinkImage(file, maxSize, quality) {
 			 * 然后从规则树重新跑一遍：规则关系 + LLM 复核。
 			 */
 			const rerunAll = useCallback(() => {
+				clearSnapshot()
 				editStore.resetGraph(allIds())
 				setEditing(null)
 				setCollapsed({})
 				setManualZoom(false)
 				if (llmConfig && llmConfig.relate !== false) {
-					flashNote('已清除手动关系与布局，重新跑规则 + LLM 复核…')
+					flashNote('已清除手动关系、布局与上版快照，重新跑规则 + LLM 复核…')
 					rerunRelations()
 				} else {
 					relationsStore.patch({ parents: {}, signature: null, status: 'idle', error: null })
-					flashNote('已清除手动关系与布局，按规则自动排布。')
+					flashNote('已清除手动关系、布局与上版快照，按规则自动排布。')
 				}
-			}, [allIds, flashNote, llmConfig, rerunRelations])
+			}, [allIds, flashNote, llmConfig, rerunRelations, clearSnapshot])
 
 			/**
 			 * 「仅规则」：同样清掉手动关系与位置（保留改名），
 			 * 但关掉本会话的 LLM 复核，只展示规则关系。
 			 */
 			const ruleOnlyReset = useCallback(() => {
+				clearSnapshot()
 				editStore.resetGraph(allIds())
 				setEditing(null)
 				setCollapsed({})
 				setManualZoom(false)
 				showRuleOnly()
-				flashNote('已清除手动关系与布局，仅使用规则关系。')
-			}, [allIds, flashNote, showRuleOnly])
+				flashNote('已清除手动关系、布局与上版快照，仅使用规则关系。')
+			}, [allIds, flashNote, showRuleOnly, clearSnapshot])
 
 			/** 屏幕坐标 → 画板坐标（画板是 scale 变换过的，所以要除以 zoom）。 */
 			const toCanvas = useCallback(

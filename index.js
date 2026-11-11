@@ -15,6 +15,7 @@
 //   POST /learnmap/summary    <- { text } -> { summary, error?: string }
 //   POST /learnmap/relations  <- { items, fresh, detail? }
 //                             -> { parents, need, raw, error?: string }
+//   GET/PUT/DELETE /learnmap/graph?session=<id>  <- 每会话节点图快照（JSON 文件）
 //
 // 配置在用户自己的 profile 补丁层：
 //   - id: learnmap
@@ -23,7 +24,7 @@
 //       model: glm-5.3-flash
 //       relate: true       # false = 不做 LLM 关系复核（仍用规则关系）
 //       apiKey: '...'      # 可选：ctx.llm 不可用时的直连兜底
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -31,6 +32,7 @@ const ROUTE_CONFIG = '/learnmap/llm.json'
 const ROUTE_LABELS = '/learnmap/labels'
 const ROUTE_RELATIONS = '/learnmap/relations'
 const ROUTE_SUMMARY = '/learnmap/summary'
+const ROUTE_GRAPH = '/learnmap/graph'
 const DEFAULT_PROVIDER = 'zai'
 const DEFAULT_MODEL = 'glm-5.3-flash'
 const DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4'
@@ -41,6 +43,8 @@ const MAX_BODY = 512 * 1024
 const CALL_TIMEOUT_MS = 25000
 const CACHE_LIMIT = 500
 const SUMMARY_MAX_CHARS = 4000
+const SNAPSHOT_SCHEMA = 1
+const SNAPSHOT_MAX_NODES = 500
 
 const NAMING_SYSTEM = [
   '你在为一次学习会话生成「知识点目录」。',
@@ -167,6 +171,45 @@ function parseRelations(text) {
   }
   const need = Array.isArray(parsed && parsed.need) ? parsed.need.filter(id => typeof id === 'string').slice(0, 5) : []
   return { parents, need }
+}
+
+/** 校验并收紧一份节点图快照，避免把任意 JSON 写进文件。 */
+function cleanSnapshot(sessionId, raw) {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.nodes)) return null
+  const seen = new Set()
+  const nodes = []
+  for (const item of raw.nodes.slice(0, SNAPSHOT_MAX_NODES)) {
+    if (!item || typeof item.id !== 'string' || !item.id) continue
+    if (seen.has(item.id)) continue
+    seen.add(item.id)
+    const x = Number(item.x)
+    const y = Number(item.y)
+    nodes.push({
+      id: item.id.slice(0, 200),
+      seq: Number.isFinite(item.seq) ? item.seq : 0,
+      name: typeof item.name === 'string' ? item.name.slice(0, 200) : '',
+      text: typeof item.text === 'string' ? item.text.slice(0, 500) : '',
+      parent: typeof item.parent === 'string' && item.parent ? item.parent.slice(0, 200) : null,
+      x: Number.isFinite(x) ? Math.round(x) : 0,
+      y: Number.isFinite(y) ? Math.round(y) : 0,
+      collapsed: item.collapsed === true
+    })
+  }
+  const view = raw.view && typeof raw.view === 'object' ? raw.view : {}
+  const zoom = Number(view.zoom)
+  const pan = view.pan && typeof view.pan === 'object' ? view.pan : {}
+  const px = Number(pan.x)
+  const py = Number(pan.y)
+  return {
+    schema: SNAPSHOT_SCHEMA,
+    sessionId,
+    savedAt: new Date().toISOString(),
+    nodes,
+    view: {
+      zoom: Number.isFinite(zoom) ? Math.max(0.18, Math.min(1.8, zoom)) : 1,
+      pan: { x: Number.isFinite(px) ? px : 16, y: Number.isFinite(py) ? py : 16 }
+    }
+  }
 }
 
 function readBody(req) {
@@ -415,6 +458,7 @@ export function apply(ctx, config) {
   const home = str(process.env.DSH_HOME, join(homedir(), '.dsh'))
   const cache = createLabelCache(join(home, 'storages', 'learnmap', 'labels-v2.json'))
   const summaryCache = createLabelCache(join(home, 'storages', 'learnmap', 'summaries-v1.json'))
+  const graphDir = join(home, 'storages', 'learnmap', 'sessions')
   let queue = Promise.resolve()
 
   const configPayload = JSON.stringify({
@@ -589,6 +633,86 @@ export function apply(ctx, config) {
           }
         }),
       'learnmap: summary route'
+    )
+
+    // 每会话节点图快照：GET / PUT / DELETE，文件写在 ~/.dsh/storages/learnmap/sessions/。
+    ctx.effect(
+      () =>
+        web.register({
+          kind: 'exact',
+          path: ROUTE_GRAPH,
+          async handler(req, res) {
+            if (!isLoopback(req)) {
+              res.statusCode = 403
+              res.end('forbidden')
+              return
+            }
+            if (options.enabled !== true) {
+              respond(res, 200, { snapshot: null })
+              return
+            }
+            const url = new URL(String(req.url || '/'), 'http://127.0.0.1')
+            const sessionId = url.searchParams.get('session') || ''
+            const file = sessionId && sessionId.length <= 200 ? join(graphDir, hashText(sessionId) + '.json') : ''
+            if (req.method === 'GET') {
+              if (!file) {
+                respond(res, 400, { snapshot: null, error: 'session required' })
+                return
+              }
+              try {
+                const parsed = JSON.parse(readFileSync(file, 'utf8'))
+                const ok = parsed && parsed.schema === SNAPSHOT_SCHEMA && parsed.sessionId === sessionId
+                respond(res, 200, { snapshot: ok ? parsed : null })
+              } catch (error) {
+                respond(res, 200, { snapshot: null })
+              }
+              return
+            }
+            if (req.method === 'DELETE') {
+              if (file) {
+                try {
+                  unlinkSync(file)
+                } catch (error) {
+                  // 文件不存在也算删除成功。
+                }
+              }
+              respond(res, 200, { ok: true })
+              return
+            }
+            if (req.method !== 'PUT') {
+              respond(res, 405, { error: 'GET/PUT/DELETE only' })
+              return
+            }
+            let body
+            try {
+              body = JSON.parse(await readBody(req))
+            } catch (error) {
+              respond(res, 400, { error: 'bad json' })
+              return
+            }
+            const sid = body && typeof body.sessionId === 'string' ? body.sessionId : ''
+            if (!sid || sid.length > 200) {
+              respond(res, 400, { error: 'session required' })
+              return
+            }
+            const snapshot = cleanSnapshot(sid, body && body.snapshot)
+            if (!snapshot) {
+              respond(res, 400, { error: 'bad snapshot' })
+              return
+            }
+            try {
+              mkdirSync(graphDir, { recursive: true })
+              const target = join(graphDir, hashText(sid) + '.json')
+              const temp = target + '.' + process.pid + '.' + Date.now() + '.tmp'
+              writeFileSync(temp, JSON.stringify(snapshot))
+              renameSync(temp, target)
+              respond(res, 200, { ok: true, savedAt: snapshot.savedAt })
+            } catch (error) {
+              respond(res, 500, { error: String((error && error.message) || error) })
+            }
+          }
+        }),
+      'learnmap: graph snapshot route'
     )
 
     // LLM 复核父子关系：只回环、只 POST。父节点必须更早这条约束由页面二次校验。
