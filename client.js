@@ -1239,25 +1239,117 @@ window.__ModuleLoader__.load({
 		// 手动关系最后应用、永远优先。失败不阻塞，可点「复核」强制重来。
 
 		const RELATIONS_ROUTE = '/learnmap/relations'
-		const RELATION_CACHE = 'learnmap.llm.relations.v7'
+		const SUMMARY_ROUTE = '/learnmap/summary'
+		const RELATION_CACHE = 'learnmap.llm.relations.v8'
 		const RELATION_CACHE_MAX = 60
 		const RELATION_MAX_ITEMS = 80
-		// 回答节选的预算：小会话给到近全文，大会话按节点数自动收缩，避免一次请求爆上下文/费用。
-		const RELATION_ANSWER_MIN = 240
-		const RELATION_ANSWER_MAX = 4000
-		const RELATION_ANSWER_BUDGET = 24000
+		const SUMMARY_CACHE = 'learnmap.llm.summaries.v1'
+		const SUMMARY_CACHE_MAX = 300
+		const SUMMARY_MAX_CALLS = 12
+		const SUMMARY_FALLBACK_CHARS = 1200
+		const summaryInFlight = new Map()
 		const relationInFlight = new Map()
-
-		/** 每个节点能带多少助手回答字符（纯函数，便于测试）。 */
-		function relationAnswerBudget(count) {
-			const n = Math.max(1, Math.floor(Number(count) || 0))
-			return Math.max(RELATION_ANSWER_MIN, Math.min(RELATION_ANSWER_MAX, Math.floor(RELATION_ANSWER_BUDGET / n)))
-		}
 
 		/** 本次真正新增的节点：已有节点在增量复核里保持不动（纯函数，便于测试）。 */
 		function pickFreshIds(knownIds, allIds) {
 			const known = knownIds instanceof Set ? knownIds : new Set(Array.isArray(knownIds) ? knownIds : [])
 			return (Array.isArray(allIds) ? allIds : []).filter(id => !known.has(id))
+		}
+
+		/** 摘要缓存：节点 id + 回答哈希 -> 200–4000 字摘要。 */
+		function readSummaryCache() {
+			try {
+				const parsed = JSON.parse(readStore(SUMMARY_CACHE) || '{}')
+				return parsed && typeof parsed === 'object' ? parsed : {}
+			} catch (error) {
+				return {}
+			}
+		}
+
+		function writeSummaryCache(key, summary) {
+			try {
+				const cache = readSummaryCache()
+				cache[key] = summary
+				const keys = Object.keys(cache)
+				if (keys.length > SUMMARY_CACHE_MAX) {
+					const kept = {}
+					for (const item of keys.slice(keys.length - SUMMARY_CACHE_MAX)) kept[item] = cache[item]
+					writeStore(SUMMARY_CACHE, JSON.stringify(kept))
+					return
+				}
+				writeStore(SUMMARY_CACHE, JSON.stringify(cache))
+			} catch (error) {
+				// 缓存失败不影响本次复核。
+			}
+		}
+
+		function summaryKey(id, text) {
+			return id + ':' + hashText(String(text || '').slice(0, 20000))
+		}
+
+		function fallbackSummary(text, question) {
+			const value = String(text || '').trim() || String(question || '').trim()
+			return value.slice(0, SUMMARY_FALLBACK_CHARS)
+		}
+
+		async function requestSummary(text) {
+			const res = await fetch(SUMMARY_ROUTE, {
+				method: 'POST',
+				credentials: 'same-origin',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ text: String(text || '').slice(0, 20000) })
+			})
+			if (!res.ok) throw new Error('HTTP ' + res.status)
+			const json = await res.json()
+			return json && typeof json.summary === 'string' ? json.summary.trim() : ''
+		}
+
+		/**
+		 * 为节点准备摘要：命中缓存的直接复用；新节点优先；一次最多生成 12 条，
+		 * 其余先用原文前 1200 字兜底，后续复核再逐步补齐。
+		 */
+		async function ensureSummaries(byId, order, freshIds) {
+			const out = new Map()
+			const cache = readSummaryCache()
+			let calls = 0
+			const ordered = Array.from(new Set([...(freshIds || []), ...(order || [])]))
+			for (const id of ordered) {
+				const entry = byId.get(id)
+				if (!entry) continue
+				const text = String(entry.node.assistantText || '').slice(0, 20000)
+				const fallback = fallbackSummary(text, entry.node.text)
+				if (!text.trim()) {
+					out.set(id, fallback)
+					continue
+				}
+				const key = summaryKey(id, text)
+				if (typeof cache[key] === 'string' && cache[key].trim()) {
+					out.set(id, cache[key])
+					continue
+				}
+				if (calls >= SUMMARY_MAX_CALLS) {
+					out.set(id, fallback)
+					continue
+				}
+				calls += 1
+				try {
+					let pending = summaryInFlight.get(key)
+					if (!pending) {
+						pending = requestSummary(text).finally(() => summaryInFlight.delete(key))
+						summaryInFlight.set(key, pending)
+					}
+					const summary = await pending
+					if (summary) {
+						out.set(id, summary)
+						writeSummaryCache(key, summary)
+					} else {
+						out.set(id, fallback)
+					}
+				} catch (error) {
+					out.set(id, fallback)
+				}
+			}
+			return out
 		}
 
 		const relationsStore = {
@@ -1315,10 +1407,21 @@ window.__ModuleLoader__.load({
 			}
 		}
 
-		/** 节点集合签名：只由 id + seq + 助手正文长度决定，改名 / 关系变化不触发重新请求。 */
+		/** 节点集合签名：由 id + seq + 助手正文哈希决定，回答内容变化会重新复核。 */
 		function relationSignature(tree) {
 			const entries = flattenTree(tree.roots)
-			return hashText(entries.map(entry => entry.node.id + ':' + (entry.node.seq || 0) + ':' + String(entry.node.assistantText || '').length).join('|'))
+			return hashText(
+				entries
+					.map(
+						entry =>
+							entry.node.id +
+							':' +
+							(entry.node.seq || 0) +
+							':' +
+							hashText(String(entry.node.assistantText || '').slice(0, 20000))
+					)
+					.join('|')
+			)
 		}
 
 		/** 只保留真正改变父节点的条目（root 与 null 等价），用于徽标与技术缓存。 */
@@ -1437,18 +1540,22 @@ window.__ModuleLoader__.load({
 			return { roots, count: tree.count, latestId: tree.latestId }
 		}
 
-		/** 请宿主复核整棵树的父子关系；fresh 非空时只允许改这些新增节点。 */
-		async function requestRelations(items, fresh) {
+		/** 请宿主复核整棵树的父子关系；fresh 非空时只允许改这些新增节点；detail 走原文第二轮。 */
+		async function requestRelations(items, fresh, detail) {
+			const body = { items: items.slice(0, RELATION_MAX_ITEMS), fresh: Array.isArray(fresh) ? fresh : [] }
+			if (detail) body.detail = detail
 			const res = await fetch(RELATIONS_ROUTE, {
 				method: 'POST',
 				credentials: 'same-origin',
 				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ items: items.slice(0, RELATION_MAX_ITEMS), fresh: Array.isArray(fresh) ? fresh : [] })
+				body: JSON.stringify(body)
 			})
 			if (!res.ok) throw new Error('HTTP ' + res.status)
 			const json = await res.json()
 			return {
 				parents: json && json.parents && typeof json.parents === 'object' ? json.parents : {},
+				need: json && Array.isArray(json.need) ? json.need.filter(id => typeof id === 'string') : [],
+				raw: json && typeof json.raw === 'string' ? json.raw : '',
 				error: json && typeof json.error === 'string' ? json.error : null
 			}
 		}
@@ -1465,6 +1572,7 @@ window.__ModuleLoader__.load({
 			const force = options && options.force === true
 			if (relationsStore.ruleOnly && !force) return
 			const entries = flattenTree(tree.roots)
+			const byId = new Map(entries.map(entry => [entry.node.id, entry]))
 			const allIds = entries.map(entry => entry.node.id)
 			const freshIds = force ? [] : pickFreshIds(relationsStore.knownIds, allIds)
 			// 增量模式：没有新节点就不打扰模型；已有节点的结构保持不变。
@@ -1480,19 +1588,77 @@ window.__ModuleLoader__.load({
 				}
 			}
 			relationsStore.patch({ status: 'busy', error: null })
-			const answerBudget = relationAnswerBudget(entries.length)
-			const items = entries.map(entry => ({
-				id: entry.node.id,
-				seq: entry.node.seq || 0,
-				text: entry.node.text,
-				// 助手回答节选：判断“是不是父主题的子类”往往要看它具体讲了什么，不能只看提问。
-				// 小会话直接给到 4000 字，节点多了再按总预算收缩。
-				answer: String(entry.node.assistantText || '').slice(0, answerBudget),
-				parent: entry.parentId || 'root'
-			}))
+			// 稳定顺序：老节点按首次复核顺序，新节点追加在末尾；这样前缀缓存才能持续命中。
+			const seen = new Set()
+			const orderedIds = []
+			for (const id of relationsStore.knownIds) {
+				if (byId.has(id) && !seen.has(id)) {
+					seen.add(id)
+					orderedIds.push(id)
+				}
+			}
+			for (const id of allIds) {
+				if (!seen.has(id)) {
+					seen.add(id)
+					orderedIds.push(id)
+				}
+			}
+			let summaries
 			const task = (async () => {
 				try {
-					const result = await requestRelations(items, freshIds)
+					try {
+						summaries = await ensureSummaries(byId, orderedIds, freshIds)
+					} catch (error) {
+						summaries = new Map()
+					}
+					if (relationsStore.ruleOnly) {
+						relationsStore.patch({ status: 'idle', error: null })
+						return
+					}
+					const items = orderedIds.map(id => {
+						const entry = byId.get(id)
+						return {
+							id,
+							seq: entry.node.seq || 0,
+							text: entry.node.text,
+							answer: summaries.get(id) || fallbackSummary(entry.node.assistantText, entry.node.text),
+							parent: entry.parentId || 'root'
+						}
+					})
+					let result = await requestRelations(items, freshIds)
+					// 模型说摘要不够时，带同一份摘要 + 被点名节点的原文再问一轮；只展开一次。
+					// 新节点的摘要过短/带不确定词时也强制补原文，避免“摘要没展开却硬猜”。
+					let needIds = result.need.slice(0, 5)
+					if (!force) {
+						for (const id of freshIds) {
+							const summary = summaries.get(id) || ''
+							if (summary.length < 400 || /未展开|不详|不确定|可能|据称|未知|待定/.test(summary)) {
+								if (!needIds.includes(id)) needIds.push(id)
+							}
+						}
+						needIds = needIds.slice(0, 5)
+					}
+					if (!result.error && needIds.length > 0) {
+						const originals = {}
+						for (const id of needIds) {
+							const entry = byId.get(id)
+							if (entry) originals[id] = String(entry.node.assistantText || '').slice(0, 20000)
+						}
+						try {
+							const detail = await requestRelations(items, freshIds, {
+								raw: result.raw,
+								need: needIds,
+								originals
+							})
+							if (!detail.error) {
+								result = { ...result, parents: detail.parents, need: detail.need }
+							} else {
+								result = { ...result, error: detail.error }
+							}
+						} catch (error) {
+							result = { ...result, error: String((error && error.message) || error) }
+						}
+					}
 					// 「仅规则」期间返回的旧结果直接丢弃，别把 overlay 又叠回去。
 					if (relationsStore.ruleOnly) return
 					// 模型可能把「保持原样」也返回；徽标与缓存只记真正变化的条目。

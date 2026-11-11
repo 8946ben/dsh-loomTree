@@ -101,6 +101,10 @@ git clone https://github.com/8946ben/dsh-loomTree.git
 
 **新增一个问题时，默认只给这个新节点找位置，已有节点的结构保持不动**；只有点「重排」才会把整棵树重新复核一遍。
 
+关系复核不再反复发送整篇回答：每个节点先由模型生成 **200–4000 字摘要**并缓存，关系判断只读摘要；
+如果模型认为摘要不够（或新节点摘要过短），会请求这些节点的**原文**，第二轮补上再给最终关系。
+这样长会话的请求前缀保持稳定，也能在摘要丢失细节时用原文兜底。
+
 「重排 / 仅规则」都会把关系图恢复到“初始生成”的状态：手动拖过的父子关系、固定位置全部丢弃；
 **手动改过的名字会保留**。区别只在于「重排」会再跑一次 LLM 复核，「仅规则」不会。
 
@@ -130,7 +134,8 @@ DSH 的会话窗口是分页加载的，所以打开图时会自动向前补齐�
 | 改名 / 关系 / 手动位置 | `localStorage['learnmap.edits.v1']`（按消息 id） |
 | 画板外观与底图 | `localStorage['learnmap.board.v1']`（图片为 dataURL） |
 | 节点标题缓存 | `localStorage['learnmap.llm.labels.v2']` + `~/.dsh/storages/learnmap/labels-v2.json` |
-| LLM 关系复核缓存 | `localStorage['learnmap.llm.relations.v7']`（按节点集合签名） |
+| LLM 关系复核缓存 | `localStorage['learnmap.llm.relations.v8']`（按节点集合签名） |
+| 回答摘要缓存 | `localStorage['learnmap.llm.summaries.v1']` + `~/.dsh/storages/learnmap/summaries-v1.json` |
 
 模型密钥只存在 profile 补丁层；宿主路由只接受回环请求，`/learnmap/llm.json` 不会回传密钥。
 
@@ -165,16 +170,18 @@ DSH 的会话窗口是分页加载的，所以打开图时会自动向前补齐�
 
 | 文件 | 说明 |
 | --- | --- |
-| `index.js` | 宿主半区：三条回环路由（配置、命名、关系复核） |
-| `client.js` | 浏览器半区：两个挂载点、建树、关系修正、布局、画板与样式 |
+| `index.js` | 宿主半区：四条回环路由（配置、命名、摘要、关系复核） |
+| `client.js` | 浏览器半区：两个挂载点、建树、摘要/关系修正、布局、画板与样式 |
 | `cordis.patch.yml` | bundle 插入的插件行 |
 | `locale/`、`icon.svg` | 插件管理器的标题、描述与图标 |
-| `smoke-test.cjs` | 离线冒烟测试（144 条） |
+| `smoke-test.cjs` | 离线冒烟测试（145 条） |
+| `flow-test.cjs` | 关系流程测试（摘要缓存、need 原文、增量复核，8 条） |
 | `llm-smoke.cjs` | 命名链路自检 |
 
 ```bash
 node --check client.js
-node smoke-test.cjs        # 期望「全部通过」144 条
+node smoke-test.cjs        # 期望「全部通过」145 条
+node flow-test.cjs         # 期望 flow-test: 8 assertions passed
 ```
 
 改 `client.js` 后刷新页面（`Ctrl+R`）即可；改 `index.js` 需要重载插件行或重启应用。

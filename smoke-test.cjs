@@ -247,7 +247,7 @@ if (graphEntry) {
 // 把 buildTree / layoutGraph 暴露出来做断言：在源码尾部临时追加导出。
 const probeSource = source.replace(
   'return { inject, apply }',
-  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __relationChanges: relationChanges, __relationAnswerBudget: relationAnswerBudget, __pickFreshIds: pickFreshIds, __canAdoptChild: canAdoptChild, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
+  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __relationChanges: relationChanges, __pickFreshIds: pickFreshIds, __summaryKey: summaryKey, __fallbackSummary: fallbackSummary, __canAdoptChild: canAdoptChild, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
 )
 loaded = null
 vm.runInContext(probeSource, sandbox, { filename: 'client-probe.js' })
@@ -441,15 +441,6 @@ if (typeof layoutGraph === 'function') {
       check('不存在的 id 不计入变更', Object.keys(relationChanges(ruleChain, { nope: 'r1' })).length === 0)
     }
 
-    // 回答节选预算：小会话近全文，大会话按总预算自动收缩
-    const relationAnswerBudget = probe.__relationAnswerBudget
-    check('探针可取到 relationAnswerBudget', typeof relationAnswerBudget === 'function')
-    if (typeof relationAnswerBudget === 'function') {
-      check('5 个节点给到单节点上限 4000', relationAnswerBudget(5) === 4000, String(relationAnswerBudget(5)))
-      check('20 个节点按总预算收缩', relationAnswerBudget(20) === 1200, String(relationAnswerBudget(20)))
-      check('80 个节点收缩到 300', relationAnswerBudget(80) === 300, String(relationAnswerBudget(80)))
-    }
-
     // 增量复核：只把没见过的节点交给模型，已有节点保持不动
     const pickFreshIds = probe.__pickFreshIds
     check('探针可取到 pickFreshIds', typeof pickFreshIds === 'function')
@@ -457,6 +448,17 @@ if (typeof layoutGraph === 'function') {
       check('只挑出新节点', JSON.stringify(pickFreshIds(['a', 'b'], ['a', 'b', 'c'])) === '["c"]')
       check('第一次全部算新节点', pickFreshIds([], ['a', 'b']).length === 2)
       check('没有新节点时不请求模型', pickFreshIds(['a', 'b'], ['a', 'b']).length === 0)
+    }
+
+    // 摘要缓存键与兜底长度
+    const summaryKey = probe.__summaryKey
+    const fallbackSummary = probe.__fallbackSummary
+    check('探针可取到摘要工具', typeof summaryKey === 'function' && typeof fallbackSummary === 'function')
+    if (typeof summaryKey === 'function' && typeof fallbackSummary === 'function') {
+      check('摘要键稳定', summaryKey('a', '正文') === summaryKey('a', '正文'))
+      check('摘要键区分节点', summaryKey('a', '正文') !== summaryKey('b', '正文'))
+      check('摘要键区分正文', summaryKey('a', '正文') !== summaryKey('a', '正文2'))
+      check('兜底摘要截断到 1200', fallbackSummary('x'.repeat(3000), 'q').length === 1200)
     }
 
     // 连线方向：从 A 的输出拖到 B，是把 B 挂到 A 下；只拒绝自己/祖先造成的环
