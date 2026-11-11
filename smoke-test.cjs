@@ -179,7 +179,7 @@ if (graphEntry) {
   check('侧栏图渲染出节点', surfaceJson.indexOf('data-lm-node') >= 0)
   check('侧栏图渲染出连线', surfaceJson.indexOf('lm-graph-edges') >= 0)
   check('侧栏图带手势提示', surfaceJson.indexOf('拖节点改位置') >= 0 && surfaceJson.indexOf('Ctrl+滚轮缩放') >= 0)
-  check('侧栏图带重排/还原按钮', surfaceJson.indexOf('重排') >= 0 && surfaceJson.indexOf('还原') >= 0)
+  check('侧栏图带重排/仅规则按钮', surfaceJson.indexOf('重排') >= 0 && surfaceJson.indexOf('仅规则') >= 0)
   check('连线带方向箭头', surfaceJson.indexOf('lm-graph-arrow') >= 0 && surfaceJson.indexOf('markerEnd') >= 0)
   check('画板底纹层铺满视口', surfaceJson.indexOf('lm-graph-bg') >= 0)
   check('画板有遮罩层', surfaceJson.indexOf('lm-graph-scrim') >= 0)
