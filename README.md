@@ -256,9 +256,12 @@ ctx.inject(['sidebarRightTabs', 'sidebarRight'], scope => {
 
 ## 安装 / 卸载
 
+仓库根目录就是可安装的 bundle（`package.json` 里带 `dsh.bundle.patch`）：
+
 ```
-# 安装（已执行）
-plugin_manager install_bundle  target=D:\test\织布机Learn\learnmap-bundle
+git clone https://github.com/8946ben/dsh-loomTree.git
+# 安装：target 指向克隆下来的目录
+plugin_manager install_bundle  target=<本仓库目录>
 # 卸载
 plugin_manager remove_bundle   target=@learnmap/web-plugin
 ```
