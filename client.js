@@ -281,7 +281,7 @@ window.__ModuleLoader__.load({
 
 		const CFG_ROUTE = '/learnmap/llm.json'
 		const LABELS_ROUTE = '/learnmap/labels'
-		const LABEL_CACHE = 'learnmap.llm.labels.v1'
+		const LABEL_CACHE = 'learnmap.llm.labels.v2'
 		const LABEL_CACHE_MAX = 600
 		const MAX_REQUEST = 40
 		/** 正在请求中的提问哈希：避免快速追问时对同一批问题重复付费。 */
@@ -1182,7 +1182,7 @@ window.__ModuleLoader__.load({
 		// 结果按「节点 id + seq」签名缓存在本地，节点集合不变就不会重复付费。
 
 		const RELATIONS_ROUTE = '/learnmap/relations'
-		const RELATION_CACHE = 'learnmap.llm.relations.v1'
+		const RELATION_CACHE = 'learnmap.llm.relations.v2'
 		const RELATION_CACHE_MAX = 60
 		const RELATION_MAX_ITEMS = 80
 		const relationInFlight = new Map()
