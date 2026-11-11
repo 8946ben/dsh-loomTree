@@ -54,16 +54,18 @@ const NAMING_SYSTEM = [
 
 const RELATION_SYSTEM = [
   '你在整理一段技术问答会话的知识树。',
-  '输入是一个按时间排序的节点数组，每个节点有：id（节点 id）、seq（序号）、q（提问原文）、parent（当前规则父节点 id，或 "root"）。',
+  '输入是一个按时间排序的节点数组，每个节点有：id（节点 id）、seq（序号）、q（提问原文）、a（助手回答节选）、parent（当前规则父节点 id，或 "root"）。',
   '任务：检查每个节点的直接父节点在主题从属关系上是否合理，并修正明显错误。',
   '规则：',
   '1. 父节点可以是数组里任意一个节点（不必更早），也可以写 "root" 表示顶层并列主题；不能指向自己、不能形成环。',
-  '2. 先判断子节点的主题是否被父节点主题包含：并列、交叉、只共享关键词，都不算父子，应该挂到它们的共同祖先。',
-  '3. 若子节点问题里出现了父节点问题中没有的核心术语（父节点讲「扩散草稿」，子节点讲「特征级自回归草稿」），通常说明二者并列，应挂到共同祖先。',
-  '4. 相邻序号不代表从属关系：同一主题下的并列问题应挂到同一个父节点，不要串成一条链。',
-  '5. 「它」「这个」「那……呢」「继续」这类承接上文的追问，挂到上文对应的那个具体节点。',
-  '6. 只在有把握时修改；不确定就保持 parent 不变，也不要在结果里输出这个节点。',
-  '7. 示例：A「扩散草稿有哪些类型」与 B「特征级自回归草稿都有哪些」不是父子，二者是并列的草稿类型；',
+  '2. parent 为 "root" 的节点是顶层主题，保持不动；不要把根节点挂到别的节点下面。',
+  '3. 先判断子节点的主题是否被父节点主题包含：并列、交叉、只共享关键词，都不算父子，应该挂到它们的共同祖先。',
+  '4. 若子节点问题里出现了父节点问题中没有的核心术语（父节点讲「扩散草稿」，子节点讲「特征级自回归草稿」），通常说明二者并列，应挂到共同祖先。',
+  '5. 结合 a 判断：如果父节点的回答里根本没展开子节点的主题，二者更可能是并列而不是父子。',
+  '6. 相邻序号不代表从属关系：同一主题下的并列问题应挂到同一个父节点，不要串成一条链。',
+  '7. 「它」「这个」「那……呢」「继续」这类承接上文的追问，挂到上文对应的那个具体节点。',
+  '8. 只在有把握时修改；不确定就保持 parent 不变，也不要在结果里输出这个节点。',
+  '9. 示例：A「扩散草稿有哪些类型」与 B「特征级自回归草稿都有哪些」不是父子，二者是并列的草稿类型；',
   '   B 应挂到 A 的父节点（如「投机解码」），不要因为都含「草稿」就串成链。',
   '只输出 JSON 对象：{"parents":{"<节点 id>":"<父节点 id 或 root>"}}，只包含你要修改的节点；不要解释、不要代码块。'
 ].join('\n')
@@ -291,6 +293,7 @@ function callRelations(ctx, options, items) {
       id: item.id,
       seq: item.seq,
       q: String(item.text || '').slice(0, 300),
+      a: String(item.answer || '').slice(0, 240),
       parent: item.parent || 'root'
     }))
   })
@@ -322,7 +325,7 @@ export function apply(ctx, config) {
     baseUrl: str(raw.baseUrl, DEFAULT_BASE_URL),
     apiKey: str(raw.apiKey, ''),
     enabled: raw.enabled !== false,
-    relate: raw.relate === true
+    relate: raw.relate !== false
   }
   if (!ctx || typeof ctx.inject !== 'function') return
 
@@ -479,6 +482,7 @@ export function apply(ctx, config) {
                 id: item.id,
                 seq: Number.isFinite(item.seq) ? item.seq : 0,
                 text: item.text,
+                answer: typeof item.answer === 'string' ? item.answer : '',
                 parent: typeof item.parent === 'string' && item.parent !== '' ? item.parent : 'root'
               }))
               .slice(0, MAX_RELATION_ITEMS)

@@ -908,6 +908,8 @@ window.__ModuleLoader__.load({
 			'.lm-graph-glyph{font-size:13px;line-height:1}',
 			'.lm-graph-count{font-size:11px;color:var(--dsw-alias-label-secondary);background:rgba(127,127,127,.14);border-radius:999px;padding:1px 8px;font-variant-numeric:tabular-nums}',
 			'.lm-graph-badge{font-size:10.5px;color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l1);border-radius:999px;padding:1px 8px}',
+			'.lm-badge-action{font:inherit;font-size:10.5px;line-height:16px;background:transparent;cursor:pointer}',
+			'.lm-badge-action:hover{color:var(--dsw-alias-brand-primary);border-color:var(--dsw-alias-brand-primary)}',
 			'.lm-graph-tools{display:flex;align-items:center;flex-wrap:wrap;gap:1px;margin-left:auto;background:rgba(127,127,127,.10);border-radius:9px;padding:2px}',
 			'.lm-tool{border:none;background:transparent;color:var(--dsw-alias-label-secondary);border-radius:7px;padding:2px 8px;font:inherit;font-size:11px;line-height:18px;cursor:pointer;transition:background .12s,color .12s}',
 			'.lm-tool:hover{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary)}',
@@ -1204,7 +1206,7 @@ window.__ModuleLoader__.load({
 		// 结果按「节点 id + seq」签名缓存在本地，节点集合不变就不会重复付费。
 
 		const RELATIONS_ROUTE = '/learnmap/relations'
-		const RELATION_CACHE = 'learnmap.llm.relations.v2'
+		const RELATION_CACHE = 'learnmap.llm.relations.v3'
 		const RELATION_CACHE_MAX = 60
 		const RELATION_MAX_ITEMS = 80
 		const relationInFlight = new Map()
@@ -1256,10 +1258,10 @@ window.__ModuleLoader__.load({
 			}
 		}
 
-		/** 节点集合签名：只由 id + seq 决定，改名 / 关系变化都不触发重新请求。 */
+		/** 节点集合签名：只由 id + seq + 助手正文长度决定，改名 / 关系变化不触发重新请求。 */
 		function relationSignature(tree) {
 			const entries = flattenTree(tree.roots)
-			return hashText(entries.map(entry => entry.node.id + ':' + (entry.node.seq || 0)).join('|'))
+			return hashText(entries.map(entry => entry.node.id + ':' + (entry.node.seq || 0) + ':' + String(entry.node.assistantText || '').length).join('|'))
 		}
 
 		function readRelationCache() {
@@ -1290,7 +1292,10 @@ window.__ModuleLoader__.load({
 
 		/**
 		 * 应用 LLM 给的父子关系修正。不要求父节点更早（知识树按主题从属，不按提问时间），
-		 * 但会做环检测：指向自己 / 形成环 / 父节点不存在的建议一律回退到原关系。
+		 * 但有两道保险：
+		 *   1. **根节点不动**：`parentId === null` 的顶层主题不允许被挂到别的节点下
+		 *      （历史事故：根节点被搬到自己的孙节点下，整棵树散架）；非根节点可以带着子树移动；
+		 *   2. 环检测：指向自己 / 形成环 / 父节点不存在的建议一律回退原关系。
 		 * 手动编辑在之后应用，所以人工关系永远优先。
 		 * @param tree - 规则树。
 		 * @param parents - `{ [id]: parentId | 'root' }`。
@@ -1310,7 +1315,8 @@ window.__ModuleLoader__.load({
 			for (const entry of entries) {
 				const current = entry.parentId
 				let next = current
-				if (Object.prototype.hasOwnProperty.call(parents, entry.node.id)) {
+				// 顶层主题保持不动；只允许有父节点的节点改挂，且必须通过环检测。
+				if (current !== null && Object.prototype.hasOwnProperty.call(parents, entry.node.id)) {
 					const raw = parents[entry.node.id]
 					if (raw === 'root') next = null
 					else if (typeof raw === 'string' && raw !== entry.node.id && known.has(raw)) next = raw
@@ -1395,6 +1401,8 @@ window.__ModuleLoader__.load({
 				id: entry.node.id,
 				seq: entry.node.seq || 0,
 				text: entry.node.text,
+				// 助手回答节选：判断“是不是父主题的子类”往往要看它具体讲了什么，不能只看提问。
+				answer: String(entry.node.assistantText || '').slice(0, 240),
 				parent: entry.parentId || 'root'
 			}))
 			const task = (async () => {
@@ -1909,6 +1917,13 @@ function shrinkImage(file, maxSize, quality) {
 				setTimeout(() => setNote(null), 4000)
 			}, [])
 
+			/** 撤销本轮 LLM 关系修正（恢复规则关系）；签名保留，避免立刻重新请求。 */
+			const dismissRelations = useCallback(() => {
+				if (Object.keys(relationsStore.parents).length === 0) return
+				relationsStore.patch({ parents: {}, status: 'idle', error: null })
+				flashNote('已撤销 LLM 关系修正，恢复规则关系；需要时可再手动调整。')
+			}, [flashNote])
+
 			/** 能否把 from 挂到 targetId 下：不能挂自己、不能挂到自己的子孙（成环）。 */
 			const canLink = useCallback(
 				(fromId, targetId) => {
@@ -2324,7 +2339,16 @@ function shrinkImage(file, maxSize, quality) {
 					: null,
 				llmConfig ? null : h('span', { className: 'lm-graph-badge' }, '规则命名'),
 				llmConfig && llmConfig.relate !== false && relations && Object.keys(relations).length > 0
-					? h('span', { className: 'lm-graph-badge', title: 'LLM 复核过父子关系，只修正了明显挂错的分支' }, '关系已校正')
+					? h(
+							'button',
+							{
+								type: 'button',
+								className: 'lm-graph-badge lm-badge-action',
+								onClick: dismissRelations,
+								title: '点击撤销 LLM 关系修正，恢复规则关系'
+							},
+							'关系已校正 · 撤销'
+					  )
 					: null,
 				h(
 					'div',

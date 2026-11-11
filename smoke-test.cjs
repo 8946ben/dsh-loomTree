@@ -393,29 +393,34 @@ if (typeof layoutGraph === 'function') {
     const moved = applyLlmParents(ruleChain, { r3: 'r1' })
     const movedRoot = moved.roots[0]
     const movedIds = (movedRoot.children || []).map((node) => node.id)
-    check('LLM 可把挂在兄弟链上的节点改挂到更早的父节点', movedIds.length === 2 && movedIds.indexOf('r2') >= 0 && movedIds.indexOf('r3') >= 0, JSON.stringify(movedIds))
+    check('LLM 可把叶子节点改挂到更早的父节点', movedIds.length === 2 && movedIds.indexOf('r2') >= 0 && movedIds.indexOf('r3') >= 0, JSON.stringify(movedIds))
     check('修正后节点数与最新节点不变', moved.count === 3 && moved.latestId === 'r3')
 
-    const detached = applyLlmParents(ruleChain, { r2: 'root' })
-    check('root 建议会把节点提为顶层', detached.roots.some((node) => node.id === 'r2'), JSON.stringify(detached.roots.map((node) => node.id)))
+    const detached = applyLlmParents(ruleChain, { r3: 'root' })
+    check('root 建议会把叶子节点提为顶层', detached.roots.some((node) => node.id === 'r3'), JSON.stringify(detached.roots.map((node) => node.id)))
 
-    // 允许挂到「更晚」的节点（知识树按主题，不按提问时间），只要不成环
-    const twoRoots = {
+    // 根节点保护：顶层主题不允许被搬到别的节点下（历史事故是根节点被搬走）
+    const rootMove = applyLlmParents(ruleChain, { r1: 'r2' })
+    check('根节点不会被自动搬走', rootMove === ruleChain)
+
+    // 非根节点可以带着子树移动（例如把“特征级”整枝挂到“投机解码”下）
+    const branchMove = applyLlmParents(ruleChain, { r2: 'root' })
+    check('非根节点可以提为顶层（带子树一起走）', branchMove.roots.some((node) => node.id === 'r2') && branchMove.roots.find((node) => node.id === 'r2').children.some((node) => node.id === 'r3'), JSON.stringify(branchMove.roots.map((node) => node.id)))
+
+    // 允许挂到「更晚」的节点（知识树按主题，不按提问时间）
+    const laterRoots = {
       roots: [
-        ruleChain.roots[0],
-        { id: 'r9', seq: 9, text: '后问的总体概览', label: '总体概览', children: [] }
+        { id: 'a0', seq: 0, text: '根主题', label: '根', children: [{ id: 'a1', seq: 1, text: '先问的问题', label: '先问', children: [] }] },
+        { id: 'a2', seq: 2, text: '后问的总览', label: '总览', children: [] }
       ],
-      count: 4,
-      latestId: 'r9'
+      count: 3,
+      latestId: 'a2'
     }
-    const crossTime = applyLlmParents(twoRoots, { r1: 'r9' })
-    const crossParent = crossTime.roots.find((node) => node.id === 'r9')
-    check('可以挂到更晚的父节点', !!crossParent && crossParent.children.some((node) => node.id === 'r1'), JSON.stringify(crossTime.roots.map((node) => node.id)))
+    const crossTime = applyLlmParents(laterRoots, { a1: 'a2' })
+    const crossParent = crossTime.roots.find((node) => node.id === 'a2')
+    check('可以挂到更晚的父节点', !!crossParent && crossParent.children.some((node) => node.id === 'a1'), JSON.stringify(crossTime.roots.map((node) => node.id)))
 
-    const cyclic = applyLlmParents(ruleChain, { r1: 'r3' })
-    check('成环的建议被忽略（退回原关系）', cyclic === ruleChain)
-
-    const missing = applyLlmParents(ruleChain, { r2: 'nope' })
+    const missing = applyLlmParents(ruleChain, { r3: 'nope' })
     check('指向不存在节点的建议被忽略', missing === ruleChain)
 
     const signature = probe.__relationSignature

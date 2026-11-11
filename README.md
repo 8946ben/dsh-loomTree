@@ -1,7 +1,7 @@
 # 学习分支图 · LoomTree
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.x-5b21b6)
-![tests](https://img.shields.io/badge/tests-126%20passing-2ea44f)
+![tests](https://img.shields.io/badge/tests-127%20passing-2ea44f)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 把 DeepSeek Harness 里的问答会话整理成一棵可编辑的知识点树：
@@ -17,7 +17,8 @@
 
 - **两个视图**：输入框上方的缩进列表（轻量）、右侧栏的节点图（全貌）
 - **节点图**：缩放 / 平移 / 拖拽节点 / 双击改名 / 拖底部圆点改父子关系 / 点选连线后断开 / 按分支折叠
-- **关系复核（默认关闭）**：配置 `relate: true` 后，规则树会交给 LLM 检查一遍，把明显挂错的分支改回去
+- **关系复核（默认开启）**：规则树交给 LLM 检查一遍，顶层主题保持不动、只调整非根节点的父子关系；
+  标题栏出现「关系已校正 · 撤销」，不满意可一键恢复规则关系
 - **长会话完整展示**：打开图时自动补全更早的历史，不需要回聊天里反复点「加载更早」
 - **画板底纹**：点阵、纯色，或任意图片（遮罩、透明度、模糊、铺满/平铺可调）
 - **本地优先**：编辑、命名缓存、底图都只存在本机；模型密钥不会下发到页面
@@ -47,14 +48,15 @@ git clone https://github.com/8946ben/dsh-loomTree.git
     enabled: true
     provider: zai            # 改成你 profile 里已配置的 provider
     model: glm-5.3-flash     # 该 provider 下的模型
-    # relate: true           # 需要 LLM 复核父子关系时再打开（默认关闭）
+    # relate: false          # 不想让 LLM 复核父子关系时关掉（默认开启）
     # 以下仅在 ctx.llm 不可用时作为直连兜底，通常不需要
     # apiKey: '...'
     # baseUrl: https://open.bigmodel.cn/api/paas/v4
 ```
 
 - 不配置 `provider` / `model` 时会使用 `zai` / `glm-5.3-flash`；你的 profile 里没有这条通路时，标题会退回规则命名。
-- 关系复核默认关闭：只有显式写 `relate: true` 才会在规则树之后请求模型；一旦你手动拖过关系，复核会自动让位给人工布局。
+- 关系复核会随着新提问自动跑；顶层主题（根节点）保持不动，非根节点可以带着子树调整。不满意时点标题栏的「关系已校正 · 撤销」，或直接手动改。
+- 一旦你手动拖过任何父子关系，复核会自动让位给人工布局，不会和你的结构混在一起。
 - `apiKey` 只放在本机 profile 补丁层，**不要提交到仓库**；页面侧拿不到密钥。
 - 关闭全部模型能力：
 
@@ -120,7 +122,7 @@ DSH 的会话窗口是分页加载的，所以打开图时会自动向前补齐�
 | 改名 / 关系 / 手动位置 | `localStorage['learnmap.edits.v1']`（按消息 id） |
 | 画板外观与底图 | `localStorage['learnmap.board.v1']`（图片为 dataURL） |
 | 节点标题缓存 | `localStorage['learnmap.llm.labels.v2']` + `~/.dsh/storages/learnmap/labels-v2.json` |
-| LLM 关系复核缓存 | `localStorage['learnmap.llm.relations.v2']`（按节点集合签名） |
+| LLM 关系复核缓存 | `localStorage['learnmap.llm.relations.v3']`（按节点集合签名） |
 
 模型密钥只存在 profile 补丁层；宿主路由只接受回环请求，`/learnmap/llm.json` 不会回传密钥。
 
@@ -130,9 +132,9 @@ DSH 的会话窗口是分页加载的，所以打开图时会自动向前补齐�
 说明当前用的是规则命名：确认 `provider` / `model` 已在 profile 中配置，且标题栏没有「命名失败」提示。
 
 **节点挂错了父节点？**
-默认只用规则关系，不会自动改动。需要模型帮忙的话，在配置里加 `relate: true`；跑完后标题栏会出现
-「关系已校正」。也可以直接手动改：拖底部圆点换父节点、点连线后 `Delete` 断开。手动改过之后，
-关系复核会自动停用，避免两套关系打架。
+关系复核会随新提问自动跑，顶层主题保持不动，非根节点可以调整；标题栏出现「关系已校正 · 撤销」时，点一下就能回到规则关系。
+也可以直接手动改：拖底部圆点换父节点、点连线后 `Delete` 断开。手动改过之后，关系复核会自动停用。
+想彻底关闭复核，在配置里写 `relate: false`。
 
 **改完关系后整棵树跳来跳去？**
 手动改关系会先固定当前布局，节点不再重排；想回到自动排列就点「重排」。
@@ -159,12 +161,12 @@ DSH 的会话窗口是分页加载的，所以打开图时会自动向前补齐�
 | `client.js` | 浏览器半区：两个挂载点、建树、关系修正、布局、画板与样式 |
 | `cordis.patch.yml` | bundle 插入的插件行 |
 | `locale/`、`icon.svg` | 插件管理器的标题、描述与图标 |
-| `smoke-test.cjs` | 离线冒烟测试（126 条） |
+| `smoke-test.cjs` | 离线冒烟测试（127 条） |
 | `llm-smoke.cjs` | 命名链路自检 |
 
 ```bash
 node --check client.js
-node smoke-test.cjs        # 期望「全部通过」126 条
+node smoke-test.cjs        # 期望「全部通过」127 条
 ```
 
 改 `client.js` 后刷新页面（`Ctrl+R`）即可；改 `index.js` 需要重载插件行或重启应用。
