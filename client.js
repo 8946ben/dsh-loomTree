@@ -486,6 +486,12 @@ window.__ModuleLoader__.load({
 			const baseTree = useMemo(() => buildTree(windowState.entries), [windowState])
 			const edits = useEdits()
 			const relations = useRelations()
+			// 切换会话时丢掉上一个会话的修正结果，避免徽标和旧映射串台（节点 id 全局唯一，不会误挂）。
+			useEffect(() => {
+				if (!sessionId) return
+				if (relationsStore.sessionId === sessionId) return
+				relationsStore.patch({ sessionId, parents: {}, signature: null, status: 'idle', error: null })
+			}, [sessionId])
 			// 顺序很重要：规则树 → LLM 关系修正 → 手动编辑（人工改关系永远最后生效）。
 			const llmTree = useMemo(() => applyLlmParents(baseTree, relations.parents), [baseTree, relations.parents])
 			const tree = useMemo(() => applyEdits(llmTree, editStore), [llmTree, edits.version])
@@ -1186,6 +1192,7 @@ window.__ModuleLoader__.load({
 			status: 'idle', // idle | busy | failed
 			error: null,
 			signature: null,
+			sessionId: null,
 			version: 0,
 			listeners: new Set(),
 			subscribe(listener) {
@@ -1211,6 +1218,7 @@ window.__ModuleLoader__.load({
 				if (next.status !== undefined) this.status = next.status
 				if (next.error !== undefined) this.error = next.error
 				if (next.signature !== undefined) this.signature = next.signature
+				if (next.sessionId !== undefined) this.sessionId = next.sessionId
 				this.emit()
 			}
 		}

@@ -205,7 +205,7 @@ function createLabelCache(file) {
  * @returns parser 的结果。
  */
 async function callChat(ctx, options, request) {
-  const { system, payload, temperature, maxTokens, parse } = request
+  const { system, payload, temperature, maxTokens, parse, allowEmpty } = request
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), CALL_TIMEOUT_MS)
   try {
@@ -229,7 +229,8 @@ async function callChat(ctx, options, request) {
         }
       }
       const parsed = parse(text)
-      if (Object.keys(parsed).length > 0) return parsed
+      // 关系复核允许「模型认为不用改」的空结果；命名则必须至少拿到一个名字。
+      if (allowEmpty === true || Object.keys(parsed).length > 0) return parsed
       throw new Error('empty completion')
     }
     throw new Error('llm service unavailable')
@@ -294,7 +295,8 @@ function callRelations(ctx, options, items) {
     payload,
     temperature: 0.2,
     maxTokens: 1400,
-    parse: parseRelations
+    parse: parseRelations,
+    allowEmpty: true
   })
 }
 
