@@ -1239,7 +1239,7 @@ window.__ModuleLoader__.load({
 		// 手动关系最后应用、永远优先。失败不阻塞，可点「复核」强制重来。
 
 		const RELATIONS_ROUTE = '/learnmap/relations'
-		const RELATION_CACHE = 'learnmap.llm.relations.v4'
+		const RELATION_CACHE = 'learnmap.llm.relations.v5'
 		const RELATION_CACHE_MAX = 60
 		const RELATION_MAX_ITEMS = 80
 		const relationInFlight = new Map()
