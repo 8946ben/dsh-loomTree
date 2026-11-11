@@ -247,7 +247,7 @@ if (graphEntry) {
 // 把 buildTree / layoutGraph 暴露出来做断言：在源码尾部临时追加导出。
 const probeSource = source.replace(
   'return { inject, apply }',
-  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __relationChanges: relationChanges, __canAdoptChild: canAdoptChild, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
+  'return { inject, apply, __buildTree: buildTree, __layoutGraph: layoutGraph, __applyEdits: applyEdits, __applyLlmParents: applyLlmParents, __relationSignature: relationSignature, __relationChanges: relationChanges, __relationAnswerBudget: relationAnswerBudget, __canAdoptChild: canAdoptChild, __graphNodeState: graphNodeState, __nodeBox: nodeBox, __zoomAt: zoomAt, __boardBackground: boardBackground, __readBoard: readBoard, __boardScrim: boardScrimOpacity, __edgePath: edgePath, __historyPagingDone: historyPagingDone }'
 )
 loaded = null
 vm.runInContext(probeSource, sandbox, { filename: 'client-probe.js' })
@@ -439,6 +439,15 @@ if (typeof layoutGraph === 'function') {
       const changed = relationChanges(ruleChain, { r3: 'r1' })
       check('真正改挂会被记录', changed.r3 === 'r1' && Object.keys(changed).length === 1, JSON.stringify(changed))
       check('不存在的 id 不计入变更', Object.keys(relationChanges(ruleChain, { nope: 'r1' })).length === 0)
+    }
+
+    // 回答节选预算：小会话近全文，大会话按总预算自动收缩
+    const relationAnswerBudget = probe.__relationAnswerBudget
+    check('探针可取到 relationAnswerBudget', typeof relationAnswerBudget === 'function')
+    if (typeof relationAnswerBudget === 'function') {
+      check('5 个节点给到单节点上限 4000', relationAnswerBudget(5) === 4000, String(relationAnswerBudget(5)))
+      check('20 个节点按总预算收缩', relationAnswerBudget(20) === 1200, String(relationAnswerBudget(20)))
+      check('80 个节点收缩到 300', relationAnswerBudget(80) === 300, String(relationAnswerBudget(80)))
     }
 
     // 连线方向：从 A 的输出拖到 B，是把 B 挂到 A 下；只拒绝自己/祖先造成的环

@@ -35,7 +35,7 @@ const DEFAULT_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4'
 const BATCH = 8
 const MAX_ITEMS = 40
 const MAX_RELATION_ITEMS = 80
-const MAX_BODY = 64 * 1024
+const MAX_BODY = 128 * 1024
 const CALL_TIMEOUT_MS = 25000
 const CACHE_LIMIT = 500
 
@@ -295,7 +295,7 @@ function callRelations(ctx, options, items) {
       id: item.id,
       seq: item.seq,
       q: String(item.text || '').slice(0, 300),
-      a: String(item.answer || '').slice(0, 240),
+      a: String(item.answer || '').slice(0, 4000),
       parent: item.parent || 'root'
     }))
   })
@@ -484,7 +484,7 @@ export function apply(ctx, config) {
                 id: item.id,
                 seq: Number.isFinite(item.seq) ? item.seq : 0,
                 text: item.text,
-                answer: typeof item.answer === 'string' ? item.answer : '',
+                answer: typeof item.answer === 'string' ? item.answer.slice(0, 4000) : '',
                 parent: typeof item.parent === 'string' && item.parent !== '' ? item.parent : 'root'
               }))
               .slice(0, MAX_RELATION_ITEMS)

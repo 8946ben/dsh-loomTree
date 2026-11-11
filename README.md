@@ -1,7 +1,7 @@
 # 学习分支图 · LoomTree
 
 ![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.x-5b21b6)
-![tests](https://img.shields.io/badge/tests-136%20passing-2ea44f)
+![tests](https://img.shields.io/badge/tests-140%20passing-2ea44f)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
 把 DeepSeek Harness 里的问答会话整理成一棵可编辑的知识点树：
@@ -128,7 +128,7 @@ DSH 的会话窗口是分页加载的，所以打开图时会自动向前补齐�
 | 改名 / 关系 / 手动位置 | `localStorage['learnmap.edits.v1']`（按消息 id） |
 | 画板外观与底图 | `localStorage['learnmap.board.v1']`（图片为 dataURL） |
 | 节点标题缓存 | `localStorage['learnmap.llm.labels.v2']` + `~/.dsh/storages/learnmap/labels-v2.json` |
-| LLM 关系复核缓存 | `localStorage['learnmap.llm.relations.v5']`（按节点集合签名） |
+| LLM 关系复核缓存 | `localStorage['learnmap.llm.relations.v6']`（按节点集合签名） |
 
 模型密钥只存在 profile 补丁层；宿主路由只接受回环请求，`/learnmap/llm.json` 不会回传密钥。
 
@@ -167,12 +167,12 @@ DSH 的会话窗口是分页加载的，所以打开图时会自动向前补齐�
 | `client.js` | 浏览器半区：两个挂载点、建树、关系修正、布局、画板与样式 |
 | `cordis.patch.yml` | bundle 插入的插件行 |
 | `locale/`、`icon.svg` | 插件管理器的标题、描述与图标 |
-| `smoke-test.cjs` | 离线冒烟测试（136 条） |
+| `smoke-test.cjs` | 离线冒烟测试（140 条） |
 | `llm-smoke.cjs` | 命名链路自检 |
 
 ```bash
 node --check client.js
-node smoke-test.cjs        # 期望「全部通过」136 条
+node smoke-test.cjs        # 期望「全部通过」140 条
 ```
 
 改 `client.js` 后刷新页面（`Ctrl+R`）即可；改 `index.js` 需要重载插件行或重启应用。

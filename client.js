@@ -1239,10 +1239,20 @@ window.__ModuleLoader__.load({
 		// 手动关系最后应用、永远优先。失败不阻塞，可点「复核」强制重来。
 
 		const RELATIONS_ROUTE = '/learnmap/relations'
-		const RELATION_CACHE = 'learnmap.llm.relations.v5'
+		const RELATION_CACHE = 'learnmap.llm.relations.v6'
 		const RELATION_CACHE_MAX = 60
 		const RELATION_MAX_ITEMS = 80
+		// 回答节选的预算：小会话给到近全文，大会话按节点数自动收缩，避免一次请求爆上下文/费用。
+		const RELATION_ANSWER_MIN = 240
+		const RELATION_ANSWER_MAX = 4000
+		const RELATION_ANSWER_BUDGET = 24000
 		const relationInFlight = new Map()
+
+		/** 每个节点能带多少助手回答字符（纯函数，便于测试）。 */
+		function relationAnswerBudget(count) {
+			const n = Math.max(1, Math.floor(Number(count) || 0))
+			return Math.max(RELATION_ANSWER_MIN, Math.min(RELATION_ANSWER_MAX, Math.floor(RELATION_ANSWER_BUDGET / n)))
+		}
 
 		const relationsStore = {
 			parents: {},
@@ -1455,12 +1465,15 @@ window.__ModuleLoader__.load({
 				}
 			}
 			relationsStore.patch({ status: 'busy', error: null })
-			const items = flattenTree(tree.roots).map(entry => ({
+			const entries = flattenTree(tree.roots)
+			const answerBudget = relationAnswerBudget(entries.length)
+			const items = entries.map(entry => ({
 				id: entry.node.id,
 				seq: entry.node.seq || 0,
 				text: entry.node.text,
 				// 助手回答节选：判断“是不是父主题的子类”往往要看它具体讲了什么，不能只看提问。
-				answer: String(entry.node.assistantText || '').slice(0, 240),
+				// 小会话直接给到 4000 字，节点多了再按总预算收缩。
+				answer: String(entry.node.assistantText || '').slice(0, answerBudget),
 				parent: entry.parentId || 'root'
 			}))
 			const task = (async () => {
