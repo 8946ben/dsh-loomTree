@@ -178,7 +178,7 @@ if (graphEntry) {
   check('侧栏图渲染出滚动画布', surfaceJson.indexOf('lm-graph-scroll') >= 0)
   check('侧栏图渲染出节点', surfaceJson.indexOf('data-lm-node') >= 0)
   check('侧栏图渲染出连线', surfaceJson.indexOf('lm-graph-edges') >= 0)
-  check('侧栏图带手势提示', surfaceJson.indexOf('拖节点改位置') >= 0 && surfaceJson.indexOf('Ctrl+滚轮缩放') >= 0)
+  check('侧栏图带手势提示', surfaceJson.indexOf('拖节点改位置') >= 0 && surfaceJson.indexOf('滚轮缩放') >= 0)
   check('侧栏图带重排/仅规则按钮', surfaceJson.indexOf('重排') >= 0 && surfaceJson.indexOf('仅规则') >= 0)
   check('连线带方向箭头', surfaceJson.indexOf('lm-graph-arrow') >= 0 && surfaceJson.indexOf('markerEnd') >= 0)
   check('画板底纹层铺满视口', surfaceJson.indexOf('lm-graph-bg') >= 0)
@@ -212,7 +212,7 @@ if (graphEntry) {
       '画板容器挂上平移手势',
       typeof props.onPointerDown === 'function' && typeof props.onPointerMove === 'function' && typeof props.onPointerUp === 'function'
     )
-    check('平移/缩放提示写在底部', surfaceJson.indexOf('中键平移') >= 0 && surfaceJson.indexOf('Ctrl+滚轮缩放') >= 0)
+    check('平移/缩放提示写在底部', surfaceJson.indexOf('中键平移') >= 0 && surfaceJson.indexOf('滚轮缩放') >= 0)
     let threw = null
     try {
       props.onPointerDown({ button: 0, target: { closest: () => null }, currentTarget: { setPointerCapture() {} }, clientX: 10, clientY: 10, pointerId: 1 })
@@ -283,7 +283,7 @@ if (typeof layoutGraph === 'function') {
   check('父节点横向居中于唯一子节点', !!m1At && !!m2At && Math.abs(m1At.x - m2At.x) < 0.001)
   check('布局尺寸为正', layout.width > 0 && layout.height > 0)
 
-  // Ctrl+滚轮缩放的锚点数学：缩放前后指针下的画板点必须不动
+  // 滚轮缩放的锚点数学：缩放前后指针下的画板点必须不动
   const zoomAt = probe.__zoomAt
   check('探针可取到 zoomAt', typeof zoomAt === 'function')
   if (typeof zoomAt === 'function') {

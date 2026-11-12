@@ -2802,27 +2802,24 @@ function shrinkImage(file, maxSize, quality) {
 				setPanning(false)
 			}
 
-			/** Ctrl/⌘ + 滚轮缩放（以指针为锚点），普通滚轮平移画板。 */
+			/** 滚轮缩放（以指针为锚点）；平移用拖空白 / 中键。 */
 			useEffect(() => {
 				const view = viewRef.current
 				if (!view || typeof view.addEventListener !== 'function') return undefined
 				const onWheel = event => {
 					const currentZoom = zoomRef.current
+					const delta = event.deltaY
+					if (!delta) return
+					event.preventDefault()
 					const rect = view.getBoundingClientRect()
 					const pointX = event.clientX - rect.left
 					const pointY = event.clientY - rect.top
-					if (event.ctrlKey || event.metaKey) {
-						event.preventDefault()
-						const step = event.deltaY > 0 ? -0.1 : 0.1
-						const nextZoom = Math.max(0.3, Math.min(1.8, Math.round((currentZoom + step) * 100) / 100))
-						if (nextZoom === currentZoom) return
-						setPan(previous => zoomAt(previous, { x: pointX, y: pointY }, currentZoom, nextZoom))
-						setManualZoom(true)
-						setZoom(nextZoom)
-						return
-					}
-					event.preventDefault()
-					setPan(previous => ({ x: previous.x - event.deltaX, y: previous.y - event.deltaY }))
+					const step = delta > 0 ? -0.1 : 0.1
+					const nextZoom = Math.max(0.18, Math.min(1.8, Math.round((currentZoom + step) * 100) / 100))
+					if (nextZoom === currentZoom) return
+					setPan(previous => zoomAt(previous, { x: pointX, y: pointY }, currentZoom, nextZoom))
+					setManualZoom(true)
+					setZoom(nextZoom)
 				}
 				view.addEventListener('wheel', onWheel, { passive: false })
 				return () => view.removeEventListener('wheel', onWheel)
@@ -2990,9 +2987,9 @@ function shrinkImage(file, maxSize, quality) {
 						title: '断开选中连线的父子关系（Delete）；子节点变成顶层'
 					}, '断开'),
 					h('span', { className: 'lm-tool-sep' }),
-					h('button', { type: 'button', className: 'lm-tool', onClick: () => { setManualZoom(true); setZoom(value => Math.max(0.18, Math.round((value - 0.1) * 10) / 10)) }, title: '缩小（Ctrl+滚轮）' }, '−'),
+					h('button', { type: 'button', className: 'lm-tool', onClick: () => { setManualZoom(true); setZoom(value => Math.max(0.18, Math.round((value - 0.1) * 10) / 10)) }, title: '缩小（滚轮）' }, '−'),
 					h('button', { type: 'button', className: 'lm-tool lm-tool-zoom', onClick: fit, title: '适宽并归位（双击空白同效）' }, Math.round(zoom * 100) + '%'),
-					h('button', { type: 'button', className: 'lm-tool', onClick: () => { setManualZoom(true); setZoom(value => Math.min(1.8, Math.round((value + 0.1) * 10) / 10)) }, title: '放大（Ctrl+滚轮）' }, '+'),
+					h('button', { type: 'button', className: 'lm-tool', onClick: () => { setManualZoom(true); setZoom(value => Math.min(1.8, Math.round((value + 0.1) * 10) / 10)) }, title: '放大（滚轮）' }, '+'),
 					h('span', { className: 'lm-tool-sep' }),
 					h('button', { type: 'button', className: 'lm-tool' + (showSettings ? ' lm-tool-on' : ''), title: '画板外观设置', 'aria-expanded': showSettings, onClick: () => setShowSettings(value => !value) }, '⚙')
 				)
@@ -3001,7 +2998,7 @@ function shrinkImage(file, maxSize, quality) {
 			const hint = h(
 				'div',
 				{ className: 'lm-graph-hint' },
-				'拖空白 / 中键平移 · Ctrl+滚轮缩放 · 双击空白适宽 · 拖节点改位置 · 双击节点改名 · 拖底部圆点到目标 = 把目标挂到当前节点下 · 点连线选中后 Delete 断开'
+				'拖空白 / 中键平移 · 滚轮缩放 · 双击空白适宽 · 拖节点改位置 · 双击节点改名 · 拖底部圆点到目标 = 把目标挂到当前节点下 · 点连线选中后 Delete 断开'
 			)
 
 
